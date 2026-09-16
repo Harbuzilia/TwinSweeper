@@ -1,11 +1,8 @@
 import flet as ft
-import os
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, format_path_short, get_current_theme,
-    get_detected_drives,
-    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, SUCCESS_COLOR,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER, SURFACE_CARD
+    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives,
+    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
 
@@ -15,7 +12,7 @@ class SearchView(ft.Column):
         self.on_scan_start = on_scan_start
         self.language = language
         self.on_language_change = on_language_change
-        
+
         self.selected_directories = []
         self.cancel_callback = None
         self.scroll = ft.ScrollMode.AUTO
@@ -85,7 +82,7 @@ class SearchView(ft.Column):
             text_size=13,
             expand=True
         )
-        
+
         self.min_size_field = ft.TextField(
             label=get_text("min_size_filter", self.language),
             hint_text="0",
@@ -143,14 +140,14 @@ class SearchView(ft.Column):
         self.progress_bar = ft.ProgressBar(value=0, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.progress_text = ft.Text("", size=13, color=TEXT_SECONDARY)
         self.status_icon = ft.Icon(ft.Icons.HOURGLASS_TOP_ROUNDED, color=PRIMARY_COLOR, size=18, visible=False)
-        
+
         self.start_button = get_primary_button(
             text=get_text("start_scan", self.language),
             on_click=self.start_scan,
             icon=ft.Icons.SEARCH_ROUNDED,
             height=46
         )
-        
+
         self.cancel_button = get_outlined_button(
             text=get_text("cancel_scan", self.language),
             on_click=self.on_cancel_click,
@@ -284,7 +281,7 @@ class SearchView(ft.Column):
                     )
                 ], spacing=8)
             ),
-            
+
             # Target Folders Card with Quick Drive Buttons
             get_styled_card(
                 ft.Column([

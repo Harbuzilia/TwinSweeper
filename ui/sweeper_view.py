@@ -1,17 +1,25 @@
 import flet as ft
 import os
-from typing import List, Dict, Optional, Set
+import threading
+from typing import List, Dict, Set
 
 from sweeper import find_empty_directories, delete_empty_directories, find_broken_shortcuts, find_junk_files
 from scanner import FileInfo, format_file_size
 from ui.components import (
     get_styled_card, get_styled_dialog, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_segmented_control, get_drive_chip, get_folder_list_item, get_progress_card, format_path_short, get_current_theme,
+    get_segmented_control, get_drive_chip, get_folder_list_item, get_progress_card,
     get_detected_drives,
     PRIMARY_COLOR, SUCCESS_COLOR, WARNING_COLOR, DANGER_COLOR,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, SURFACE_CARD, SURFACE_HOVER, BORDER_COLOR
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, SURFACE_HOVER, BORDER_COLOR
 )
 from locales import get_text
+from ops_log import log_delete_operation
+
+try:
+    from send2trash import send2trash
+    HAS_SEND2TRASH = True
+except ImportError:
+    HAS_SEND2TRASH = False
 
 class SweeperView(ft.Column):
     ITEMS_PER_PAGE = 50
@@ -23,7 +31,7 @@ class SweeperView(ft.Column):
 
         self.selected_directories: List[str] = []
         self.active_mode = "empty_folders"  # "empty_folders", "broken_shortcuts", "junk_files"
-        
+
         self.empty_folders_list: List[str] = []
         self.broken_shortcuts_list: List[Dict[str, str]] = []
         self.junk_files_list: List[FileInfo] = []
@@ -54,7 +62,7 @@ class SweeperView(ft.Column):
 
         self.progress_bar = ft.ProgressBar(value=None, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.status_text = ft.Text("", size=13, color=TEXT_SECONDARY)
-        
+
         self.results_column = ft.Column(spacing=6)
         self.load_more_btn = get_outlined_button(
             text=get_text("load_more", self.language),
@@ -84,7 +92,6 @@ class SweeperView(ft.Column):
             self.update_folders_list()
 
     def build_ui(self):
-        theme = get_current_theme()
         drive_chips = [
             get_drive_chip(
                 drive_label=d,
@@ -224,7 +231,6 @@ class SweeperView(ft.Column):
         self.loaded_count = 0
         self.update()
 
-        import threading
         def _worker():
             try:
                 if self.active_mode == "empty_folders":
@@ -390,12 +396,62 @@ class SweeperView(ft.Column):
         except Exception:
             pass
 
+    def _page_or_none(self):
+        """flet's Control.page raises RuntimeError instead of returning None for
+        controls not yet added to the page — this keeps headless use safe."""
+        try:
+            return self.page
+        except RuntimeError:
+            return None
+
     def on_clean_clicked(self, e):
         if not self.selected_items:
             return
+        page = self._page_or_none()
+        if page is None:
+            return
 
-        import threading
+        total = len(self.selected_items)
 
+        def cancel_dialog(_):
+            page.pop_dialog()
+
+        def confirm_clean(use_trash: bool):
+            page.pop_dialog()
+            self.execute_clean(use_trash)
+
+        # H4: no destructive action without an explicit confirmation dialog.
+        # Empty folders are removed with os.rmdir (which can only ever remove a
+        # truly empty directory); the Recycle Bin option applies to file modes.
+        show_trash_option = self.active_mode != "empty_folders" and HAS_SEND2TRASH
+        trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=True)
+
+        content_controls = [
+            ft.Text(get_text("sweep_delete_confirm", self.language).format(total), size=14)
+        ]
+        if show_trash_option:
+            content_controls.append(trash_checkbox)
+
+        dlg = get_styled_dialog(
+            title=get_text("confirm_deletion_title", self.language),
+            icon=ft.Icons.DELETE_FOREVER_ROUNDED,
+            icon_color=DANGER_COLOR,
+            content=ft.Column(content_controls, tight=True, spacing=12),
+            actions=[
+                get_outlined_button(text=get_text("cancel", self.language), on_click=cancel_dialog),
+                get_primary_button(
+                    text=get_text("delete", self.language),
+                    on_click=lambda _: confirm_clean(
+                        use_trash=trash_checkbox.value if show_trash_option else False
+                    ),
+                    bgcolor=DANGER_COLOR,
+                    icon=ft.Icons.DELETE_ROUNDED
+                )
+            ]
+        )
+        page.show_dialog(dlg)
+
+    def execute_clean(self, use_trash: bool):
         total = len(self.selected_items)
         self.progress_bar.visible = True
         self.progress_bar.value = 0
@@ -407,7 +463,7 @@ class SweeperView(ft.Column):
         except Exception:
             pass
 
-        state = {"deleted_count": 0, "errors": []}
+        state = {"deleted_count": 0, "freed": 0, "errors": [], "deleted_paths": []}
 
         def _worker():
             CHUNK = 200
@@ -417,33 +473,65 @@ class SweeperView(ft.Column):
                 deleted_count, errs = delete_empty_directories(items)
                 state["deleted_count"] = deleted_count
                 state["errors"].extend(errs)
-                self.empty_folders_list = [f for f in self.empty_folders_list if f not in self.selected_items]
+                deleted = {f for f in items if not os.path.exists(f)}
+                state["deleted_paths"] = sorted(deleted)
+                # Failed folders stay listed so the user can retry them.
+                self.empty_folders_list = [f for f in self.empty_folders_list if f not in deleted]
             else:
                 for start in range(0, len(items), CHUNK):
                     chunk = items[start:start + CHUNK]
                     for path in chunk:
                         try:
-                            if os.path.exists(path):
+                            stat = os.stat(path)
+                        except FileNotFoundError:
+                            continue  # already gone since the scan
+                        except OSError as ex:
+                            state["errors"].append(f"{os.path.basename(path)}: {ex}")
+                            continue
+                        try:
+                            if use_trash and HAS_SEND2TRASH:
+                                try:
+                                    send2trash(path)
+                                except Exception as trash_ex:
+                                    # H5: a failed move to the Recycle Bin must
+                                    # never become an unrecoverable delete.
+                                    state["errors"].append(get_text("trash_failed", self.language).format(path, trash_ex))
+                                    continue
+                            else:
                                 os.remove(path)
-                                state["deleted_count"] += 1
+                            state["deleted_count"] += 1
+                            state["freed"] += stat.st_size
+                            state["deleted_paths"].append(path)
                         except Exception as ex:
                             state["errors"].append(f"{os.path.basename(path)}: {ex}")
 
                     # Update progress
                     done = min(start + CHUNK, len(items))
-                    self.progress_bar.value = done / len(items) if len(items) else 1
+                    self.progress_bar.value = done / len(items) if items else 1
                     self.status_text.value = get_text("deleting", self.language).format(state["deleted_count"], total)
                     try:
                         self.update()
                     except Exception:
                         pass
 
+                deleted = set(state["deleted_paths"])
                 if self.active_mode == "broken_shortcuts":
-                    self.broken_shortcuts_list = [s for s in self.broken_shortcuts_list if s["path"] not in self.selected_items]
+                    self.broken_shortcuts_list = [s for s in self.broken_shortcuts_list if s["path"] not in deleted]
                 else:
-                    self.junk_files_list = [j for j in self.junk_files_list if j.path not in self.selected_items]
+                    self.junk_files_list = [j for j in self.junk_files_list if j.path not in deleted]
 
             self.selected_items.clear()
+
+            # Journal the removal (like ResultsView deletions); a journal
+            # failure is reported, never swallowed.
+            if state["deleted_paths"]:
+                try:
+                    log_delete_operation(
+                        state["deleted_paths"], state["freed"],
+                        use_trash=(use_trash and self.active_mode != "empty_folders")
+                    )
+                except Exception as log_ex:
+                    state["errors"].append(f"operations log: {log_ex}")
 
             # Hide progress
             self.progress_bar.visible = False
@@ -451,10 +539,14 @@ class SweeperView(ft.Column):
             self.render_sweep_results()
 
             # Show feedback dialog
-            if self.page:
+            page = self._page_or_none()
+            if page:
                 msg = get_text("sweeper_clean_complete", self.language).format(state["deleted_count"])
+                if state["freed"]:
+                    msg += "\n" + get_text("deleted_space_freed", self.language).format(format_file_size(state["freed"]))
                 if state["errors"]:
                     msg += f"\n\n{get_text('sweeper_clean_errors', self.language).format(len(state['errors']))}"
+                    msg += "\n" + "\n".join(state["errors"][:5])
                 dlg = get_styled_dialog(
                     title=get_text("deletion_complete", self.language),
                     title_color=SUCCESS_COLOR,
@@ -463,13 +555,13 @@ class SweeperView(ft.Column):
                     content=ft.Text(msg, color=TEXT_SECONDARY),
                     actions=[get_primary_button(
                         text=get_text("ok", self.language),
-                        on_click=lambda _: self.page.pop_dialog(),
+                        on_click=lambda _: page.pop_dialog(),
                         bgcolor=PRIMARY_COLOR
                     )]
                 )
-                self.page.show_dialog(dlg)
+                page.show_dialog(dlg)
                 try:
-                    self.page.update()
+                    page.update()
                 except Exception:
                     pass
 

@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from typing import List, Optional, Tuple
 
 from db_cache import get_data_dir
@@ -34,7 +35,9 @@ def save_operations(ops: List[dict]) -> None:
 def append_operation(op_type: str, paths: List[str], freed_bytes: int, details: Optional[dict] = None) -> dict:
     ops = load_operations()
     op = {
-        "id": str(int(time.time() * 1000)),
+        # Random id: timestamp-ms ids collide when two operations land in the
+        # same millisecond, making undo act on the wrong operation (L4).
+        "id": uuid.uuid4().hex,
         "type": op_type,
         "ts": time.time(),
         "paths": paths,
@@ -72,11 +75,24 @@ def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
                 continue
             if os.path.exists(duplicate):
                 if os.path.samefile(original, duplicate):
-                    os.remove(duplicate)
+                    # Copy the original to a temp sibling first and swap it in
+                    # atomically: a failed copy must never leave the duplicate
+                    # destroyed (M7 — the old code removed it before copying).
+                    tmp_copy = duplicate + f".tmp_undo_{os.getpid()}"
+                    try:
+                        shutil.copy2(original, tmp_copy)
+                        os.replace(tmp_copy, duplicate)
+                    finally:
+                        if os.path.exists(tmp_copy):
+                            try:
+                                os.remove(tmp_copy)
+                            except OSError:
+                                pass
                 else:
                     # Path was recreated by the user afterwards - leave it untouched.
                     continue
-            shutil.copy2(original, duplicate)
+            else:
+                shutil.copy2(original, duplicate)
             restored += 1
         except Exception as ex:
             errors.append(f"{duplicate}: {ex}")

@@ -1,5 +1,6 @@
-flet
-send2trash
-pyinstaller
-xxhash
-Pillow
+# Runtime dependencies — exact versions from the project venv (Python 3.14).
+# Build/test tools (pyinstaller, pytest, ruff) live in requirements-dev.txt.
+flet==0.86.5
+Send2Trash==2.1.0
+xxhash==4.0.1
+pillow==12.3.0

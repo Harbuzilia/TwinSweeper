@@ -20,7 +20,7 @@ FILE_CATEGORIES = {
     "audio": {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma", ".opus", ".alac"},
     "documents": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".odt", ".csv", ".epub"},
     "archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso", ".dmg", ".cab"},
-    "code": {".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".json", ".xml", ".yaml", ".yml", 
+    "code": {".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".json", ".xml", ".yaml", ".yml",
              ".cpp", ".c", ".h", ".hpp", ".cs", ".java", ".go", ".rs", ".php", ".rb", ".sql", ".sh", ".bat", ".ps1"}
 }
 
@@ -40,6 +40,12 @@ def format_file_size(size_in_bytes: int) -> str:
         return f"{size_in_bytes / (1024**2):.2f} MB"
     else:
         return f"{size_in_bytes / (1024**3):.2f} GB"
+
+def compute_wasted_bytes(groups: Dict[str, List["FileInfo"]]) -> int:
+    """Bytes freed by keeping one file per group: sum of the actual duplicate
+    sizes. (M9: ``(n-1) * group[0].size`` lies when group members differ in
+    size — e.g. same-name matches or mixed-size clusters.)"""
+    return sum(f.size for files in groups.values() for f in files[1:])
 
 @dataclass
 class FileInfo:
@@ -77,47 +83,77 @@ def get_turbo_hash(filepath: str, partial_size: int = 65536) -> Optional[str]:
             hasher = xxhash.xxh64()
         else:
             hasher = hashlib.md5()
-            
+
         with open(filepath, "rb") as f:
             hasher.update(f.read(partial_size))
             if file_size > partial_size * 2:
                 f.seek(-partial_size, 2)
                 hasher.update(f.read(partial_size))
-                
+
         hasher.update(str(file_size).encode())
         return hasher.hexdigest()
     except (OSError, PermissionError):
         return None
 
-def is_system_path(path: str) -> bool:
-    """Checks if the path belongs to a protected Windows system directory or file."""
-    path_lower = os.path.normpath(path).lower()
-    
-    system_dirs = [
+# Known system locations matched as whole path components, never as substrings
+# (M2: substring matching flagged paths like E:\bootcamp\notes.txt).
+_ROOT_LEVEL_SYSTEM_DIRS = {
+    "$recycle.bin", "system volume information", "$windows.~bt", "$windows.~ws",
+    "recovery", "boot", "config.msi", "msocache", "windows",
+    "program files", "program files (x86)", "programdata",
+}
+_SYSTEM_DIR_COMPONENTS = {"system32", "syswow64", "winsxs"}
+
+
+def _system_roots() -> List[str]:
+    """Real system root paths from the environment plus common fallbacks.
+
+    Computed per call so tests (and unusual setups) can override via env vars.
+    """
+    roots = []
+    for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"):
+        value = os.environ.get(var)
+        if value:
+            roots.append(os.path.normcase(os.path.abspath(value)))
+    roots.extend([
         r"c:\windows",
         r"c:\program files",
         r"c:\program files (x86)",
-        r"c:\programdata\microsoft",
-        r"c:\recovery",
-        r"\system32",
-        r"\syswow64",
-        r"\winsxs",
-        r"\boot",
-        r"\system volume information",
-        r"\$recycle.bin",
-        r"\$windows.~bt",
-        r"\$windows.~ws"
-    ]
-    
-    for sys_dir in system_dirs:
-        if sys_dir in path_lower:
-            return True
-            
-    system_exts = {".sys", ".dll", ".inf", ".ocx", ".vxd", ".drv", ".cpl", ".rom", ".efi"}
-    ext = os.path.splitext(path_lower)[1]
-    if ext in system_exts:
+        r"c:\programdata",
+    ])
+    return roots
+
+
+def is_system_path(path: str) -> bool:
+    """Checks if the path belongs to a protected Windows system directory or file.
+
+    Component-based matching (M2): a path is system when its first directory
+    component is a known system folder (on any drive), when any component is a
+    system-only directory (system32/winsxs/...), or when it lives under a real
+    system root taken from the environment. User files merely named like system
+    paths (E:\\bootcamp\\notes.txt, E:\\Games\\mod.dll) are NOT flagged.
+    """
+    try:
+        norm = os.path.normcase(os.path.abspath(path))
+    except (OSError, ValueError):
+        return False
+
+    parts = norm.split(os.sep)
+    if parts and parts[0].endswith(":"):
+        parts = parts[1:]
+    parts = [p for p in parts if p]
+    if not parts:
+        return False
+
+    if parts[0] in _ROOT_LEVEL_SYSTEM_DIRS:
         return True
-        
+    if any(p in _SYSTEM_DIR_COMPONENTS for p in parts):
+        return True
+
+    for root in _system_roots():
+        if norm == root or norm.startswith(root + os.sep):
+            return True
+
     return False
 
 def compare_byte_by_byte(file1: str, file2: str, buffer_size: int = 65536) -> bool:
@@ -198,7 +234,7 @@ def scan_directory(
                 try:
                     stat = os.stat(filepath)
                     file_size = stat.st_size
-                    
+
                     if ignore_empty_files and file_size == 0:
                         continue
                     if file_size < min_size_bytes:
@@ -313,7 +349,7 @@ def scan_directory(
     if turbo_mode and by_hash and duplicates:
         report_progress("Verifying full hashes for potential matches...", 0.85)
         verified_grouped = defaultdict(list)
-        
+
         for key, files in duplicates.items():
             if is_cancelled():
                 return {}
@@ -330,7 +366,7 @@ def scan_directory(
                     if by_name:
                         v_key = f"{info.name.lower()}|" + v_key
                     verified_grouped[v_key].append(info)
-                    
+
         duplicates = {k: v for k, v in verified_grouped.items() if len(v) > 1}
 
     # Phase 3: Byte-by-byte verification (if enabled)
@@ -338,11 +374,11 @@ def scan_directory(
         report_progress("Phase 3/3: Performing byte-by-byte verification...", 0.9)
         final_duplicates = {}
         total_groups = len(duplicates)
-        
+
         for g_idx, (key, files) in enumerate(duplicates.items(), 1):
             if is_cancelled():
                 return {}
-            
+
             remaining = files[:]
             sub_idx = 0
             while remaining:
@@ -354,14 +390,14 @@ def scan_directory(
                         matched.append(other)
                     else:
                         unmatched.append(other)
-                
+
                 if len(matched) > 1:
                     final_duplicates[f"{key}_b{sub_idx}"] = matched
                     sub_idx += 1
                 remaining = unmatched
-                
+
             report_progress(f"Byte verification {g_idx}/{total_groups}...", 0.9 + (g_idx / total_groups) * 0.1)
-            
+
         duplicates = final_duplicates
 
     # Deterministic order inside every group: oldest file first.
@@ -419,12 +455,19 @@ def scan_for_sample(
 
                 try:
                     stat = os.stat(filepath)
-                    if by_size and stat.st_size != sample_size:
+                    if (by_size or by_hash or by_byte) and stat.st_size != sample_size:
+                        # Hash or byte equality implies identical size, so
+                        # wrong-size files are skipped before any hashing (M5).
                         continue
                     if by_name and filename.lower() != sample_name:
                         continue
                     if by_hash:
-                        f_hash = get_file_hash(filepath)
+                        # SQLite cache first, like scan_directory does.
+                        f_hash = cache_db.get_file_hash(filepath, stat.st_size, stat.st_mtime, turbo=False)
+                        if not f_hash:
+                            f_hash = get_file_hash(filepath)
+                            if f_hash:
+                                cache_db.save_file_hash(filepath, stat.st_size, stat.st_mtime, full_hash=f_hash)
                         if f_hash != sample_hash or f_hash is None:
                             continue
                     if by_byte:

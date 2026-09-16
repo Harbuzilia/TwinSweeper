@@ -4,12 +4,24 @@ import sqlite3
 import threading
 from typing import Optional, Dict
 
+from app_logging import get_logger
+
+logger = get_logger(__name__)
+
 def get_data_dir() -> str:
     """Writable directory for persistent app data.
 
     PyInstaller --onefile unpacks `__file__` into a temporary `_MEI*` folder that is
     wiped on exit, so the cache DB must live in the per-user profile when frozen.
+
+    DUPLICATER_DATA_DIR overrides everything (checked first) — used by the test
+    suite to keep runtime data isolated from the real user profile.
     """
+    env_dir = os.environ.get("DUPLICATER_DATA_DIR")
+    if env_dir:
+        os.makedirs(env_dir, exist_ok=True)
+        return env_dir
+
     if getattr(sys, "frozen", False):
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         data_dir = os.path.join(base, "Duplicater")
@@ -21,7 +33,7 @@ DB_PATH = os.path.join(get_data_dir(), "scan_cache.db")
 
 class ScanCacheDB:
     """Thread-safe SQLite persistent hash cache for ultra-fast duplicate rescanning."""
-    
+
     _instance = None
     _lock = threading.Lock()
 
@@ -75,8 +87,8 @@ class ScanCacheDB:
                 cached_size, cached_mtime, full_h, turbo_h = row
                 if cached_size == size and abs(cached_mtime - mtime) < 0.001:
                     return turbo_h if (turbo and turbo_h) else full_h
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("file hash cache lookup failed for %s: %s", path, ex)
         return None
 
     def save_file_hash(self, path: str, size: int, mtime: float, full_hash: Optional[str] = None, turbo_hash: Optional[str] = None):
@@ -93,8 +105,8 @@ class ScanCacheDB:
                         full_hash = COALESCE(excluded.full_hash, file_hashes.full_hash),
                         turbo_hash = COALESCE(excluded.turbo_hash, file_hashes.turbo_hash);
                 """, (path, size, mtime, full_hash, turbo_hash))
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("file hash cache save failed for %s: %s", path, ex)
 
     def get_image_phash(self, path: str, size: int, mtime: float) -> Optional[str]:
         """Fetch cached perceptual dhash."""
@@ -107,8 +119,8 @@ class ScanCacheDB:
                 cached_size, cached_mtime, dhash = row
                 if cached_size == size and abs(cached_mtime - mtime) < 0.001:
                     return dhash
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("image phash cache lookup failed for %s: %s", path, ex)
         return None
 
     def save_image_phash(self, path: str, size: int, mtime: float, dhash: str, ahash: Optional[str] = None):
@@ -125,8 +137,8 @@ class ScanCacheDB:
                         dhash = excluded.dhash,
                         ahash = excluded.ahash;
                 """, (path, size, mtime, dhash, ahash))
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("image phash cache save failed for %s: %s", path, ex)
 
     def get_cache_stats(self) -> Dict[str, int]:
         """Return total cached files count and cache file size on disk."""
@@ -139,8 +151,8 @@ class ScanCacheDB:
             total_hashes = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM image_phashes")
             total_images = cursor.fetchone()[0]
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug("cache stats failed: %s", ex)
 
         db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
         return {
@@ -157,7 +169,9 @@ class ScanCacheDB:
                 conn.execute("DELETE FROM file_hashes;")
                 conn.execute("DELETE FROM image_phashes;")
             conn.execute("VACUUM;")
-        except Exception:
-            pass
+        except Exception as ex:
+            # User-initiated action: a silent failure here would leave the user
+            # convinced the cache was wiped when it was not.
+            logger.warning("cache clear failed: %s", ex)
 
 cache_db = ScanCacheDB()

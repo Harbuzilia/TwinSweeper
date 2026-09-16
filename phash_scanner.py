@@ -18,8 +18,10 @@ def compute_dhash(image_path: str, hash_size: int = 8) -> Optional[str]:
         with Image.open(image_path) as img:
             # Convert to grayscale and resize to (hash_size + 1, hash_size)
             img = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
-            pixels = list(img.getdata())
-            
+            # tobytes() yields one byte per pixel for mode "L" without the
+            # Image.getdata() API deprecated for removal in Pillow 14 (M4).
+            pixels = img.tobytes()
+
             # Compare adjacent pixels in each row
             diff = []
             for row in range(hash_size):
@@ -42,7 +44,7 @@ def hamming_distance(hex1: str, hex2: str) -> int:
     try:
         val1 = int(hex1, 16)
         val2 = int(hex2, 16)
-        return bin(val1 ^ val2).count('1')
+        return (val1 ^ val2).bit_count()
     except ValueError:
         return 64
 
@@ -85,7 +87,7 @@ def scan_similar_images(
     # 1. Discover all image files
     report("Discovering image files...", 0.0)
     image_files: List[FileInfo] = []
-    
+
     for directory in directories:
         if is_cancelled() or not os.path.exists(directory):
             continue
@@ -127,7 +129,7 @@ def scan_similar_images(
         cached_phash = cache_db.get_image_phash(info.path, info.size, info.modified)
         if cached_phash:
             return info, cached_phash
-        
+
         phash = compute_dhash(info.path)
         if phash:
             cache_db.save_image_phash(info.path, info.size, info.modified, phash)
@@ -176,15 +178,18 @@ def scan_similar_images(
         if root_a != root_b:
             parent[root_b] = root_a
 
+    # Precompiled integer hashes: the pairwise loop is O(n^2) and re-parsing
+    # hex strings + bin().count('1') for every pair dominated its cost (M4).
+    hash_ints = [int(h, 16) for _, h in hashed_images]
     num_hashes = len(hashed_images)
     for i in range(num_hashes):
         if is_cancelled():
             return {}
-        info_a, hash_a = hashed_images[i]
         for j in range(i + 1, num_hashes):
-            info_b, hash_b = hashed_images[j]
-            dist = hamming_distance(hash_a, hash_b)
-            if dist <= max_hamming_dist:
+            # Periodic cancel check keeps the hot loop tight yet responsive.
+            if (j & 0x3FF) == 0 and is_cancelled():
+                return {}
+            if (hash_ints[i] ^ hash_ints[j]).bit_count() <= max_hamming_dist:
                 union_sets(i, j)
 
     # 4. Group results
@@ -196,11 +201,13 @@ def scan_similar_images(
 
     # Keep only clusters with 2+ images
     results = {}
-    for root_id, files in clusters.items():
+    for group_index, (root_id, files) in enumerate(clusters.items(), 1):
         if len(files) > 1:
             # Sort files in group by modification date (oldest first)
             files.sort(key=lambda x: x.modified)
-            key = f"Photo Group: {files[0].name}"
+            # Numbered group key: two clusters whose first files share a name
+            # must not overwrite each other in the dict (M3).
+            key = f"Photo Group {group_index}: {files[0].name}"
             results[key] = files
 
     report("Similar photo scan complete!", 1.0)

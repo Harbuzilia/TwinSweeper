@@ -294,7 +294,7 @@ def get_badge(text: str, color: Optional[str] = None, icon: Optional[str] = None
     if icon:
         content_list.append(ft.Icon(icon, size=12, color=c))
     content_list.append(ft.Text(text, size=11, color=c, weight=ft.FontWeight.W_600))
-    
+
     return ft.Container(
         content=ft.Row(content_list, spacing=4, alignment=ft.MainAxisAlignment.CENTER),
         bgcolor=f"{c}22",
@@ -453,7 +453,7 @@ def get_drive_chip(
     text_col = eff_accent if is_selected else theme["TEXT_PRIMARY"]
     icon_col = eff_accent if is_selected else theme["TEXT_SECONDARY"]
     eff_tooltip = tooltip if tooltip is not None else drive_label
-    
+
     return ft.Container(
         content=ft.Row([
             ft.Icon(ft.Icons.STORAGE_ROUNDED, size=13, color=icon_col),
@@ -481,7 +481,6 @@ def get_progress_card(
     Unified modern scanning/task progress card with status indicator,
     progress bar, meta information, and centered action buttons.
     """
-    theme = get_current_theme()
     actions = []
     if primary_action_btn:
         actions.append(primary_action_btn)
@@ -515,7 +514,7 @@ def get_action_icon_button(
     """
     theme = get_current_theme()
     eff_icon_color = icon_color or theme["TEXT_SECONDARY"]
-    
+
     btn_icon = ft.Icon(icon, size=icon_size, color=eff_icon_color)
 
     container = ft.Container(
@@ -560,7 +559,7 @@ def get_styled_dialog(
     theme = get_current_theme()
     eff_title_col = title_color or theme["TEXT_PRIMARY"]
     eff_icon_col = icon_color or theme["PRIMARY_COLOR"]
-    
+
     title_items = []
     if icon:
         title_items.append(
@@ -572,13 +571,13 @@ def get_styled_dialog(
             )
         )
     title_items.append(ft.Text(title, size=16, weight=ft.FontWeight.W_600, color=eff_title_col))
-    
+
     title_widget = ft.Row(title_items, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
-    
+
     wrapped_content = content
     if width:
         wrapped_content = ft.Container(content=content, width=width)
-        
+
     return ft.AlertDialog(
         title=title_widget,
         content=wrapped_content,

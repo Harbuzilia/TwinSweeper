@@ -9,7 +9,7 @@ translations = {
         "nav_compare": "Folder Compare",
         "nav_history": "History & Stats",
         "nav_settings": "Settings",
-        
+
         # Scanner Screen
         "find_duplicates": "Find Duplicates",
         "select_folder_instruction": "Select target folders and criteria to scan for duplicate files.",
@@ -74,6 +74,7 @@ translations = {
         "clean_junk_files_btn": "Remove Selected Junk Files",
         "sweeper_clean_complete": "Cleanup complete! Removed {} items.",
         "sweeper_clean_errors": "Failed to remove: {} items.",
+        "sweep_delete_confirm": "You are about to delete {} selected items.",
         "target_path": "Missing Target",
         "no_empty_folders": "No empty folder trees found.",
         "no_broken_shortcuts": "No broken shortcuts found.",
@@ -142,6 +143,9 @@ translations = {
         "confirm_system_delete": "I understand the risk. Proceed.",
         "no_files_selected": "No files currently selected.",
         "error_delete": "Failed to delete {}: {}",
+        "error_verify_failed": "Skipped (file changed since scan) {}: {}",
+        "trash_failed": "Could not move {} to Recycle Bin: {} — the file was NOT deleted.",
+        "delete_all_selected_warning": "⚠️ All files are selected in {} groups. The original (first) file of each such group will be kept automatically.",
         "deleting": "Deleting... {}/{} files",
         "hardlinking": "Hardlinking... {}/{} files",
         "cancel": "Cancel",
@@ -177,6 +181,10 @@ translations = {
         "similarity": "Similarity",
         "identical": "Identical (100%)",
         "different_content": "Modified Content",
+        "cmp_newer_a": "A is newer",
+        "cmp_newer_b": "B is newer",
+        "cmp_larger_a": "A is larger",
+        "cmp_larger_b": "B is larger",
 
         # History
         "history": "Scan History",
@@ -305,6 +313,7 @@ translations = {
         "clean_junk_files_btn": "Удалить выбранный мусор",
         "sweeper_clean_complete": "Очистка завершена! Удалено объектов: {}.",
         "sweeper_clean_errors": "Не удалось удалить объектов: {}.",
+        "sweep_delete_confirm": "Вы собираетесь удалить выбранных объектов: {}.",
         "target_path": "Несуществующая цель",
         "no_empty_folders": "Пустых папок не обнаружено.",
         "no_broken_shortcuts": "Битых ярлыков не обнаружено.",
@@ -373,6 +382,9 @@ translations = {
         "confirm_system_delete": "Я понимаю риск. Всё равно удалить.",
         "no_files_selected": "Файлы для действия не выбраны.",
         "error_delete": "Ошибка удаления {}: {}",
+        "error_verify_failed": "Пропущен (файл изменился после сканирования) {}: {}",
+        "trash_failed": "Не удалось переместить в Корзину {}: {} — файл НЕ удалён.",
+        "delete_all_selected_warning": "⚠️ В {} группах выделены ВСЕ файлы. Оригинал (первый файл) каждой такой группы будет автоматически сохранён.",
         "deleting": "Удаление... {}/{} файлов",
         "hardlinking": "Создание hardlink... {}/{} файлов",
         "cancel": "Отмена",
@@ -408,6 +420,10 @@ translations = {
         "similarity": "Сходство",
         "identical": "Идентичны (100%)",
         "different_content": "Изменено содержимое",
+        "cmp_newer_a": "А новее",
+        "cmp_newer_b": "Б новее",
+        "cmp_larger_a": "А больше",
+        "cmp_larger_b": "Б больше",
 
         # History
         "history": "История сканирований",

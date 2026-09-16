@@ -1,15 +1,14 @@
 import flet as ft
 import os
-from typing import List, Optional
+from typing import Optional
 
-from scanner import FileInfo, format_file_size
+from scanner import format_file_size
 from ui.components import (
     SIMILARITY_COLOR,
     get_styled_card, get_stat_card, get_primary_button, get_header_row, get_badge,
-    get_segmented_control, get_drive_chip, get_progress_card, format_path_short, get_current_theme,
-    get_detected_drives,
+    get_segmented_control, get_drive_chip, get_progress_card, format_path_short, get_detected_drives,
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, DANGER_COLOR, INFO_COLOR,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_CARD, SURFACE_HOVER
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
 
@@ -18,12 +17,12 @@ class CompareView(ft.Column):
         super().__init__()
         self.on_compare_start = on_compare_start
         self.language = language
-        
+
         self.folder_a: Optional[str] = None
         self.folder_b: Optional[str] = None
         self.comparison_data = None
         self.active_tab = "common"
-        
+
         self.scroll = ft.ScrollMode.AUTO
         self.expand = True
         self.spacing = 14
@@ -35,10 +34,10 @@ class CompareView(ft.Column):
         # UI State
         self.folder_a_display = ft.Text(get_text("no_folder_a", language), size=13, color=TEXT_MUTED)
         self.folder_b_display = ft.Text(get_text("no_folder_b", language), size=13, color=TEXT_MUTED)
-        
+
         self.progress_bar = ft.ProgressBar(value=None, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.status_text = ft.Text("", size=13, color=TEXT_SECONDARY)
-        
+
         self.results_container = ft.Column(spacing=12)
 
         self.build_ui()
@@ -199,7 +198,7 @@ class CompareView(ft.Column):
         self.progress_bar.visible = False
         self.status_text.value = ""
         self.comparison_data = results
-        
+
         unique_a = results["unique_a"]
         unique_b = results["unique_b"]
         common = results["common"]
@@ -287,20 +286,34 @@ class CompareView(ft.Column):
             if not items:
                 rows.append(ft.Text("No common files found.", color=TEXT_MUTED))
             for item in items:
+                # Real compare_folders schema (H1): every common entry carries
+                # two FileInfo objects (file_a/file_b) plus similarity/newer/larger.
+                fa = item["file_a"]
+                fb = item["file_b"]
                 sim = item["similarity"]
                 badge_color = SUCCESS_COLOR if sim == 1.0 else SIMILARITY_COLOR
                 badge_text = get_text("identical", self.language) if sim == 1.0 else f"{sim*100:.0f}% {get_text('similarity', self.language)}"
+
+                badges = [get_badge(badge_text, color=badge_color)]
+                if fa.size == fb.size:
+                    badges.append(get_badge(format_file_size(fa.size), color=PRIMARY_COLOR))
+                else:
+                    badges.append(get_badge(f"{format_file_size(fa.size)} / {format_file_size(fb.size)}", color=PRIMARY_COLOR))
+                if item["newer"] != "same":
+                    badges.append(get_badge(get_text("cmp_newer_a" if item["newer"] == "a" else "cmp_newer_b", self.language), color=WARNING_COLOR))
+                if item["larger"] != "same":
+                    badges.append(get_badge(get_text("cmp_larger_a" if item["larger"] == "a" else "cmp_larger_b", self.language), color=INFO_COLOR))
+
                 rows.append(
                     ft.Container(
                         content=ft.Row([
                             ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED if sim == 1.0 else ft.Icons.CHANGE_CIRCLE_OUTLINED, color=badge_color, size=20),
                             ft.Column([
-                                ft.Text(item["name"], weight=ft.FontWeight.BOLD, size=13, color=TEXT_PRIMARY),
-                                ft.Text(f"A: {format_path_short(item['path_a'])}", size=11, color=TEXT_MUTED),
-                                ft.Text(f"B: {format_path_short(item['path_b'])}", size=11, color=TEXT_MUTED),
+                                ft.Text(fa.name, weight=ft.FontWeight.BOLD, size=13, color=TEXT_PRIMARY),
+                                ft.Text(f"A: {format_path_short(fa.path)}", size=11, color=TEXT_MUTED),
+                                ft.Text(f"B: {format_path_short(fb.path)}", size=11, color=TEXT_MUTED),
                             ], expand=True, spacing=2),
-                            get_badge(badge_text, color=badge_color),
-                            get_badge(format_file_size(item["size"]), color=PRIMARY_COLOR)
+                            ft.Row(badges, spacing=6, wrap=True)
                         ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
                         bgcolor=SURFACE_HOVER,
                         border=ft.Border.all(1, BORDER_COLOR),

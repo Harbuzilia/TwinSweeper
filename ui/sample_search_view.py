@@ -6,8 +6,7 @@ from typing import List, Optional
 from scanner import format_file_size, get_file_category
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_drive_chip, get_folder_list_item, get_progress_card, format_path_short, get_current_theme,
-    get_detected_drives,
+    get_drive_chip, get_folder_list_item, get_progress_card, format_path_short, get_detected_drives,
     PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, SURFACE_HOVER, BORDER_COLOR,
     CATEGORY_ICONS
@@ -19,11 +18,11 @@ class SampleSearchView(ft.Column):
         super().__init__()
         self.on_scan_start = on_scan_start
         self.language = language
-        
+
         self.sample_path: Optional[str] = None
         self.search_directories: List[str] = []
         self.cancel_callback = None
-        
+
         self.scroll = ft.ScrollMode.AUTO
         self.expand = True
         self.spacing = 14
@@ -218,8 +217,6 @@ class SampleSearchView(ft.Column):
     def update_folders_list(self):
         self.folders_container.controls.clear()
         for folder in self.search_directories:
-            drive_letter = os.path.splitdrive(folder)[0]
-            short_p = format_path_short(folder, max_chars=60)
             self.folders_container.controls.append(
                 get_folder_list_item(
                     path=folder,

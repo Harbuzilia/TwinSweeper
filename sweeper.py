@@ -4,7 +4,9 @@ from typing import List, Dict, Tuple, Optional, Callable
 from scanner import FileInfo, is_system_path
 
 JUNK_EXTENSIONS = {".tmp", ".bak", ".old", ".dmp", ".log", ".gid", ".chk"}
-JUNK_FILENAMES = {"thumbs.db", ".ds_store", "desktop.ini", "$recycle.bin"}
+# desktop.ini is NOT junk (H4): it is a legitimate Windows folder-customization
+# file — deleting it breaks folder icons/views.
+JUNK_FILENAMES = {"thumbs.db", ".ds_store", "$recycle.bin"}
 
 def find_empty_directories(
     directories: List[str],
@@ -87,9 +89,14 @@ def resolve_windows_shortcut_target(lnk_path: str) -> Optional[str]:
         # Extract LinkInfo
         if has_link_info and len(content) >= offset + 0x1C:
             link_info_size = struct.unpack('<I', content[offset:offset + 4])[0]
+            link_info_flags = struct.unpack('<I', content[offset + 0x08:offset + 0x0C])[0]
             local_base_path_offset = struct.unpack('<I', content[offset + 0x10:offset + 0x14])[0]
-            
-            if local_base_path_offset < link_info_size:
+
+            # LinkInfoFlags bit 0 = VolumeIdAndLocalBasePath; offset 0 means the
+            # shortcut has no local base path (network-only) and must not be
+            # parsed as one (M10) — that produced garbage targets from
+            # unrelated header bytes.
+            if (link_info_flags & 0x1) and 0 < local_base_path_offset < link_info_size:
                 path_start = offset + local_base_path_offset
                 path_end = content.find(b'\x00', path_start)
                 if path_end != -1:

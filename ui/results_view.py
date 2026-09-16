@@ -4,23 +4,26 @@ import csv
 import json
 import datetime
 import functools
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Tuple
 from PIL import Image
 
-from scanner import FileInfo, is_system_path, format_file_size
+from scanner import FileInfo, is_system_path, format_file_size, compute_wasted_bytes
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
     get_kpi_badge, format_path_short, get_current_theme, get_styled_dialog, get_action_icon_button,
     PRIMARY_COLOR, SUCCESS_COLOR, DANGER_COLOR, INFO_COLOR, WARNING_COLOR,
-    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_CARD, SURFACE_HOVER,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER,
     CATEGORY_ICONS
 )
 from locales import get_text
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
 
-    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru"):
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru", allow_hardlink: bool = True):
         super().__init__()
         self.all_results = dict(results)
         self.filtered_results = dict(results)
@@ -28,10 +31,11 @@ class ResultsView(ft.Column):
         self.on_delete = on_delete
         self.on_hardlink = on_hardlink
         self.language = language
+        self.allow_hardlink = allow_hardlink
 
         # Global selection state
         self.selected_paths: Set[str] = set()
-        
+
         self.active_category: str = "all"
         self.search_query: str = ""
         self.loaded_groups_count: int = 0
@@ -42,7 +46,7 @@ class ResultsView(ft.Column):
         self.sort_mode: str = "wasted"
         self.grid_mode: bool = False
         self.collapsed_groups: Set[str] = set()
-        
+
         self.scroll = ft.ScrollMode.AUTO
         self.expand = True
         self.spacing = 14
@@ -54,7 +58,13 @@ class ResultsView(ft.Column):
         # Calculate Overall Stats
         self.total_groups = len(results)
         self.total_dupe_files = sum(max(0, len(files) - 1) for files in results.values())
-        self.total_wasted_bytes = sum(max(0, len(files) - 1) * files[0].size for files in results.values() if files)
+        self.total_wasted_bytes = compute_wasted_bytes(results)
+
+        # Scan-time (path, size, mtime) snapshots; the delete/hardlink worker
+        # re-verifies each file against these before touching it (C2 TOCTOU).
+        self._path_to_info: Dict[str, FileInfo] = {
+            f.path: f for files in results.values() for f in files
+        }
 
         # Count and Size by Categories
         self.category_counts = {"all": self.total_groups}
@@ -63,7 +73,7 @@ class ResultsView(ft.Column):
             if files:
                 cat = files[0].category
                 self.category_counts[cat] = self.category_counts.get(cat, 0) + 1
-                wasted = max(0, len(files) - 1) * files[0].size
+                wasted = sum(f.size for f in files[1:])
                 self.category_wasted[cat] = self.category_wasted.get(cat, 0) + wasted
 
         # UI Components
@@ -166,10 +176,13 @@ class ResultsView(ft.Column):
             bgcolor=PRIMARY_COLOR,
             height=40
         )
+        # C1a: hardlinks require byte-identical files — never offer the button
+        # for "visually similar" photo clusters.
+        self.hardlink_btn.visible = self.allow_hardlink
 
         self.category_chips_row = ft.Row(spacing=6, scroll=ft.ScrollMode.AUTO)
         self.results_column = ft.Column(spacing=10)
-        
+
         self.load_more_btn = get_outlined_button(
             text=get_text("load_more", self.language),
             on_click=self.load_more_groups,
@@ -193,7 +206,6 @@ class ResultsView(ft.Column):
 
     def build_master_kpi_strip(self) -> ft.Container:
         """Compact horizontal master KPI status strip."""
-        theme = get_current_theme()
         selected_size = sum(
             f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
         )
@@ -384,7 +396,7 @@ class ResultsView(ft.Column):
         # Sort groups
         items = list(filtered.items())
         if self.sort_mode == "wasted":
-            items.sort(key=lambda kv: max(0, len(kv[1]) - 1) * (kv[1][0].size if kv[1] else 0), reverse=True)
+            items.sort(key=lambda kv: sum(f.size for f in kv[1][1:]), reverse=True)
         elif self.sort_mode == "count":
             items.sort(key=lambda kv: len(kv[1]), reverse=True)
         elif self.sort_mode == "size":
@@ -436,7 +448,7 @@ class ResultsView(ft.Column):
         cat = files[0].category if files else "other"
         cat_icon, cat_color = CATEGORY_ICONS.get(cat, CATEGORY_ICONS["other"])
         file_size_str = format_file_size(files[0].size) if files else "0 B"
-        wasted_for_group = format_file_size(max(0, len(files) - 1) * files[0].size) if files else "0 B"
+        wasted_for_group = format_file_size(sum(f.size for f in files[1:])) if files else "0 B"
 
         is_collapsed = key in self.collapsed_groups
 
@@ -516,7 +528,7 @@ class ResultsView(ft.Column):
         short_p = format_path_short(file.path, max_chars=65)
 
         badge_status = get_badge(get_text("original_first", self.language), color=SUCCESS_COLOR) if index == 0 else get_badge(get_text("duplicate_label", self.language), color=DANGER_COLOR)
-        
+
         info_col = ft.Column([
             ft.Row([
                 get_badge(drive_letter, color=PRIMARY_COLOR) if drive_letter else ft.Container(),
@@ -627,6 +639,29 @@ class ResultsView(ft.Column):
             except Exception:
                 pass
 
+    def _protect_originals(self):
+        """C3: in a group where every file is selected the whole group would be
+        deleted — keep the original (files[0], labelled 'Keep') in each such group."""
+        for files in self.all_results.values():
+            if len(files) > 1 and all(f.path in self.selected_paths for f in files):
+                self.selected_paths.discard(files[0].path)
+
+    def count_endangered_groups(self) -> int:
+        """Groups currently selected for complete deletion (every file checked)."""
+        return sum(
+            1 for files in self.all_results.values()
+            if len(files) > 1 and all(f.path in self.selected_paths for f in files)
+        )
+
+    def get_selected_entries(self) -> List[Tuple[str, int, float]]:
+        """(path, size, mtime) snapshots for the selected files (C2)."""
+        entries = []
+        for path in self.selected_paths:
+            info = self._path_to_info.get(path)
+            if info is not None:
+                entries.append((path, info.size, info.modified))
+        return entries
+
     def apply_smart_selection(self, e):
         rule = self.smart_select_dropdown.value
         if rule == "invert":
@@ -654,6 +689,9 @@ class ResultsView(ft.Column):
                         self.selected_paths.add(f.path)
                 elif rule == "none":
                     pass
+
+        # C3: "all"/"invert" can leave whole groups selected — keep one copy.
+        self._protect_originals()
 
         self.results_column.controls.clear()
         items = list(self.filtered_results.items())[:self.loaded_groups_count]
@@ -769,13 +807,13 @@ class ResultsView(ft.Column):
         try:
             os.startfile(path)
         except Exception as ex:
-            print(f"Error opening file: {ex}")
+            logger.warning("Error opening file '%s': %s", path, ex)
 
     def open_in_explorer(self, path: str):
         try:
             os.startfile(os.path.dirname(path))
         except Exception as ex:
-            print(f"Error opening directory: {ex}")
+            logger.warning("Error opening directory '%s': %s", path, ex)
 
     def on_delete_clicked(self, e):
         if not self.selected_paths:
@@ -786,19 +824,25 @@ class ResultsView(ft.Column):
         total_size = sum(
             f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
         )
+        endangered = self.count_endangered_groups()
 
         def confirm_delete(use_trash: bool):
             self.page.pop_dialog()
+            # C3: keep at least one copy in every fully-selected group.
+            self._protect_originals()
+            selected_entries = self.get_selected_entries()
+            if not selected_entries:
+                return
             # Show progress bar
             self.operation_progress.visible = True
             self.operation_progress.value = 0
             self.operation_status.visible = True
-            self.operation_status.value = get_text("deleting", self.language).format(0, len(selected_list))
+            self.operation_status.value = get_text("deleting", self.language).format(0, len(selected_entries))
             try:
                 self.update()
             except Exception:
                 pass
-            self.on_delete(selected_list, use_trash=use_trash)
+            self.on_delete(selected_entries, use_trash=use_trash)
 
         def cancel_dialog(e):
             self.page.pop_dialog()
@@ -810,11 +854,21 @@ class ResultsView(ft.Column):
             trash_checkbox
         ]
 
+        if endangered:
+            content_controls.insert(0,
+                ft.Container(
+                    content=ft.Text(get_text("delete_all_selected_warning", self.language).format(endangered), color=WARNING_COLOR, size=12),
+                    bgcolor=f"{WARNING_COLOR}22",
+                    padding=10,
+                    border_radius=8
+                )
+            )
+
         if system_files:
             sys_summary = "\n".join([f"• {os.path.basename(f)}" for f in system_files[:4]])
             if len(system_files) > 4:
                 sys_summary += f"\n... (+{len(system_files) - 4} more)"
-            content_controls.insert(0, 
+            content_controls.insert(0,
                 ft.Container(
                     content=ft.Text(get_text("system_delete_warning", self.language).format(sys_summary), color=DANGER_COLOR, size=12),
                     bgcolor=f"{DANGER_COLOR}22",
@@ -865,7 +919,8 @@ class ResultsView(ft.Column):
                 if not files:
                     continue
                 original = files[0].path
-                dupes = [f.path for f in files[1:] if f.path in self.selected_paths]
+                # (path, size, mtime) snapshots — the worker re-verifies (C2).
+                dupes = [(f.path, f.size, f.modified) for f in files[1:] if f.path in self.selected_paths]
                 if dupes:
                     groups_map[original] = dupes
 
@@ -901,13 +956,16 @@ class ResultsView(ft.Column):
         self.all_results = new_all_results
         self.total_groups = len(self.all_results)
         self.total_dupe_files = sum(max(0, len(files) - 1) for files in self.all_results.values())
-        self.total_wasted_bytes = sum(max(0, len(files) - 1) * files[0].size for files in self.all_results.values() if files)
+        self.total_wasted_bytes = compute_wasted_bytes(self.all_results)
+        self._path_to_info = {f.path: f for files in self.all_results.values() for f in files}
 
         self.category_counts = {"all": self.total_groups}
+        self.category_wasted = {}
         for files in self.all_results.values():
             if files:
                 cat = files[0].category
                 self.category_counts[cat] = self.category_counts.get(cat, 0) + 1
+                self.category_wasted[cat] = self.category_wasted.get(cat, 0) + sum(f.size for f in files[1:])
 
         self.build_ui()
         self.refresh_filtered_results()
@@ -962,4 +1020,4 @@ class ResultsView(ft.Column):
                             f.write(f"  - {file.path}\n")
                         f.write("\n")
         except Exception as ex:
-            print(f"Export error: {ex}")
+            logger.warning("Export error for '%s': %s", path, ex)

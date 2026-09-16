@@ -1,6 +1,27 @@
 import os
 import ctypes
+import ctypes.wintypes
+import logging
 from typing import Tuple, List, Dict
+
+from scanner import get_file_hash
+
+logger = logging.getLogger(__name__)
+
+# CreateHardLinkW with proper prototypes and use_last_error=True so the
+# Win32 error code is fetched reliably instead of whatever GetLastError()
+# happened to hold (M1).
+try:
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateHardLinkW.argtypes = [
+        ctypes.c_wchar_p,  # lpFileName
+        ctypes.c_wchar_p,  # lpExistingFileName
+        ctypes.c_void_p,   # lpSecurityAttributes
+    ]
+    _kernel32.CreateHardLinkW.restype = ctypes.wintypes.BOOL
+except Exception:  # pragma: no cover - only hit on non-Windows
+    _kernel32 = None
+
 
 def is_same_volume(path1: str, path2: str) -> bool:
     """Checks whether two paths reside on the exact same disk volume/partition."""
@@ -20,6 +41,9 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     its data is lost), the hardlink is moved into place, and only then the old data is
     dropped. On failure the original duplicate is restored.
 
+    Refuses to link files whose content is not byte-identical: a hardlink between
+    different content would silently destroy the duplicate's data (C1).
+
     Returns (success, error_message, freed_bytes).
     """
     if not os.path.exists(source_original) or not os.path.isfile(source_original):
@@ -37,24 +61,48 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     try:
         if os.path.samefile(source_original, target_duplicate):
             return True, "", 0  # Already linked: nothing left to free.
-    except Exception:
-        pass
+    except Exception as ex:
+        logger.debug("samefile check failed for %s vs %s: %s", source_original, target_duplicate, ex)
 
     try:
+        src_size = os.path.getsize(source_original)
         dup_size = os.path.getsize(target_duplicate)
-    except OSError:
-        dup_size = 0
+    except OSError as ex:
+        return False, str(ex), 0
+
+    # C1 guard: only byte-identical files may be hardlinked. Sizes must match
+    # and full SHA-256 must match — this protects visually-similar (but
+    # different) photos selected for hardlinking by mistake.
+    if src_size != dup_size:
+        return False, "Files differ in size — hardlink refused to prevent data loss.", 0
+    src_hash = get_file_hash(source_original)
+    dup_hash = get_file_hash(target_duplicate)
+    if not src_hash or not dup_hash or src_hash != dup_hash:
+        return False, "Files differ in content — hardlink refused to prevent data loss.", 0
 
     temp_link = target_duplicate + f".tmp_hl_{os.getpid()}"
     backup = target_duplicate + f".tmp_hl_backup_{os.getpid()}"
+
+    # M6: stale temp files from a previously crashed run would make
+    # CreateHardLinkW fail (file already exists) and are never cleaned up
+    # anywhere else — remove them before retrying.
+    for stale in (temp_link, backup):
+        if os.path.exists(stale):
+            try:
+                os.remove(stale)
+            except OSError as ex:
+                return False, f"Cannot remove stale temp file '{stale}': {ex}", 0
+
     try:
         # Create hardlink at temporary path first
         if os.name == 'nt':
-            # Use CreateHardLinkW API for Windows NTFS
-            res = ctypes.windll.kernel32.CreateHardLinkW(temp_link, source_original, None)
-            if not res:
-                err = ctypes.GetLastError()
-                return False, f"Windows CreateHardLink error code {err}", 0
+            if _kernel32 is not None:
+                res = _kernel32.CreateHardLinkW(temp_link, source_original, None)
+                if not res:
+                    err = ctypes.get_last_error()
+                    return False, f"Windows CreateHardLinkW failed (Win32 error {err})", 0
+            else:  # pragma: no cover - fallback when ctypes is unavailable
+                os.link(source_original, temp_link)
         else:
             os.link(source_original, temp_link)
 
@@ -71,22 +119,25 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
             if os.path.exists(temp_link):
                 try:
                     os.remove(temp_link)
-                except Exception:
-                    pass
+                except Exception as cleanup_ex:
+                    logger.warning("temp file left behind after failed hardlink: %s (%s)", temp_link, cleanup_ex)
             return False, str(ex), 0
 
         # Path now points to the shared inode; drop the duplicate's old data.
+        # If the removal fails the hardlink is still in place — report success
+        # but no freed space and mention the leftover (M6).
         try:
             os.remove(backup)
-        except OSError:
-            pass
+        except OSError as ex:
+            logger.warning("Hardlink created but old copy could not be removed: %s (%s)", backup, ex)
+            return True, f"Hardlink created, but the old copy could not be removed: {backup}", 0
         return True, "", dup_size
     except Exception as ex:
         if os.path.exists(temp_link):
             try:
                 os.remove(temp_link)
-            except Exception:
-                pass
+            except Exception as cleanup_ex:
+                logger.warning("temp file left behind after failed hardlink: %s (%s)", temp_link, cleanup_ex)
         return False, str(ex), 0
 
 def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[int, int, List[str], List[str]]:
@@ -110,6 +161,8 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
                 success_count += 1
                 freed_bytes += freed
                 succeeded_paths.append(dup)
+                if err:
+                    errors.append(f"Hardlinked '{os.path.basename(dup)}' with a warning: {err}")
             else:
                 errors.append(f"Failed to hardlink '{os.path.basename(dup)}': {err}")
 
