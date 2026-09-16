@@ -1,0 +1,207 @@
+import os
+import fnmatch
+from typing import List, Dict, Tuple, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
+
+from scanner import FileInfo
+from db_cache import cache_db
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".ico"}
+
+def compute_dhash(image_path: str, hash_size: int = 8) -> Optional[str]:
+    """
+    Computes 64-bit difference hash (dHash) for an image.
+    Resistant to scaling, compression artifacts, and color changes.
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to grayscale and resize to (hash_size + 1, hash_size)
+            img = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
+            pixels = list(img.getdata())
+            
+            # Compare adjacent pixels in each row
+            diff = []
+            for row in range(hash_size):
+                row_start = row * (hash_size + 1)
+                for col in range(hash_size):
+                    p_left = pixels[row_start + col]
+                    p_right = pixels[row_start + col + 1]
+                    diff.append(1 if p_left > p_right else 0)
+
+            # Convert 64 bits to hex string
+            decimal_val = 0
+            for bit in diff:
+                decimal_val = (decimal_val << 1) | bit
+            return f"{decimal_val:016x}"
+    except Exception:
+        return None
+
+def hamming_distance(hex1: str, hex2: str) -> int:
+    """Calculates bitwise Hamming distance between two 64-bit hex hashes (0 to 64)."""
+    try:
+        val1 = int(hex1, 16)
+        val2 = int(hex2, 16)
+        return bin(val1 ^ val2).count('1')
+    except ValueError:
+        return 64
+
+def similarity_percentage(hex1: str, hex2: str) -> float:
+    """Returns visual similarity percentage (0.0 to 100.0)."""
+    dist = hamming_distance(hex1, hex2)
+    return max(0.0, (1.0 - (dist / 64.0))) * 100.0
+
+def scan_similar_images(
+    directories: List[str],
+    similarity_threshold: float = 0.90,  # 0.80 to 1.0 (e.g. 0.90 = 90%)
+    progress_callback: Optional[Callable[[str, Optional[float]], None]] = None,
+    cancel_flag: Optional[List[bool]] = None,
+    exclude_patterns: Optional[List[str]] = None,
+    max_workers: int = 8
+) -> Dict[str, List[FileInfo]]:
+    """
+    Scans directories for visually similar images using perceptual hashing (pHash/dHash).
+    Clusters matching images into groups.
+    """
+    def is_cancelled():
+        return cancel_flag is not None and len(cancel_flag) > 0 and cancel_flag[0]
+
+    def report(msg: str, pct: Optional[float] = None):
+        if progress_callback:
+            progress_callback(msg, pct)
+
+    def should_exclude(path: str) -> bool:
+        """Same matching rules as scanner.scan_directory: fnmatch on basename or path substring."""
+        if not exclude_patterns:
+            return False
+        path_norm = os.path.normpath(path).lower()
+        base_name = os.path.basename(path_norm)
+        for pattern in exclude_patterns:
+            p = pattern.strip().lower()
+            if p and (fnmatch.fnmatch(base_name, p) or fnmatch.fnmatch(path_norm, f"*{p}*")):
+                return True
+        return False
+
+    # 1. Discover all image files
+    report("Discovering image files...", 0.0)
+    image_files: List[FileInfo] = []
+    
+    for directory in directories:
+        if is_cancelled() or not os.path.exists(directory):
+            continue
+        for root, dirs, filenames in os.walk(directory, followlinks=False):
+            if is_cancelled():
+                return {}
+            # Prune excluded directories so the walker never descends into them.
+            if exclude_patterns:
+                dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
+            for filename in filenames:
+                ext = os.path.splitext(filename.lower())[1]
+                if ext in IMAGE_EXTENSIONS:
+                    filepath = os.path.join(root, filename)
+                    if should_exclude(filepath):
+                        continue
+                    try:
+                        stat = os.stat(filepath)
+                        if stat.st_size > 0:
+                            image_files.append(FileInfo(
+                                path=filepath,
+                                name=filename,
+                                size=stat.st_size,
+                                created=stat.st_ctime,
+                                modified=stat.st_mtime,
+                                category="images"
+                            ))
+                    except (OSError, PermissionError):
+                        continue
+
+    total_images = len(image_files)
+    if total_images < 2 or is_cancelled():
+        return {}
+
+    report(f"Computing perceptual hashes for {total_images} photos...", 0.1)
+
+    # 2. Compute pHashes in parallel using SQLite Cache
+    def get_or_calc_phash(info: FileInfo) -> Tuple[FileInfo, Optional[str]]:
+        # Check SQLite Cache first
+        cached_phash = cache_db.get_image_phash(info.path, info.size, info.modified)
+        if cached_phash:
+            return info, cached_phash
+        
+        phash = compute_dhash(info.path)
+        if phash:
+            cache_db.save_image_phash(info.path, info.size, info.modified, phash)
+        return info, phash
+
+    hashed_images: List[Tuple[FileInfo, str]] = []
+    processed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(get_or_calc_phash, info): info for info in image_files}
+        for future in as_completed(futures):
+            if is_cancelled():
+                executor.shutdown(wait=False, cancel_futures=True)
+                return {}
+            try:
+                info, phash = future.result()
+                if phash:
+                    info.hash = phash
+                    hashed_images.append((info, phash))
+            except Exception:
+                pass
+
+            processed += 1
+            if processed % 50 == 0 or processed == total_images:
+                pct = 0.1 + (processed / total_images) * 0.6
+                report(f"Hashed {processed}/{total_images} photos...", pct)
+
+    if is_cancelled() or len(hashed_images) < 2:
+        return {}
+
+    # 3. Cluster by Hamming Distance using Disjoint Set (Union-Find)
+    report("Clustering visually similar photos...", 0.75)
+    max_hamming_dist = int(64 * (1.0 - similarity_threshold))
+
+    parent = list(range(len(hashed_images)))
+
+    def find_set(v):
+        if v == parent[v]:
+            return v
+        parent[v] = find_set(parent[v])
+        return parent[v]
+
+    def union_sets(a, b):
+        root_a = find_set(a)
+        root_b = find_set(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    num_hashes = len(hashed_images)
+    for i in range(num_hashes):
+        if is_cancelled():
+            return {}
+        info_a, hash_a = hashed_images[i]
+        for j in range(i + 1, num_hashes):
+            info_b, hash_b = hashed_images[j]
+            dist = hamming_distance(hash_a, hash_b)
+            if dist <= max_hamming_dist:
+                union_sets(i, j)
+
+    # 4. Group results
+    from collections import defaultdict
+    clusters = defaultdict(list)
+    for idx, (info, phash) in enumerate(hashed_images):
+        root = find_set(idx)
+        clusters[root].append(info)
+
+    # Keep only clusters with 2+ images
+    results = {}
+    for root_id, files in clusters.items():
+        if len(files) > 1:
+            # Sort files in group by modification date (oldest first)
+            files.sort(key=lambda x: x.modified)
+            key = f"Photo Group: {files[0].name}"
+            results[key] = files
+
+    report("Similar photo scan complete!", 1.0)
+    return results

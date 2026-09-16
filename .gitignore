@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# PyInstaller / Build artifacts
+build/
+dist/
+*.spec
+
+# History & logs
+scan_history.json
+*.log
+
+# Runtime data (contains inventory of user file paths)
+operations_log.json
+scan_cache.db
+scan_cache.db-shm
+scan_cache.db-wal
+
+# Test & tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# IDE files
+.vscode/
+.idea/
+*.swp

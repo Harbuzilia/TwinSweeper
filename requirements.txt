@@ -1,0 +1,5 @@
+flet
+send2trash
+pyinstaller
+xxhash
+Pillow

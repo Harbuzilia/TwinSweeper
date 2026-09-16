@@ -1,0 +1,965 @@
+import flet as ft
+import os
+import csv
+import json
+import datetime
+import functools
+from typing import Dict, List, Set, Optional
+from PIL import Image
+
+from scanner import FileInfo, is_system_path, format_file_size
+from ui.components import (
+    get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
+    get_kpi_badge, format_path_short, get_current_theme, get_styled_dialog, get_action_icon_button,
+    PRIMARY_COLOR, SUCCESS_COLOR, DANGER_COLOR, INFO_COLOR, WARNING_COLOR,
+    TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_CARD, SURFACE_HOVER,
+    CATEGORY_ICONS
+)
+from locales import get_text
+
+class ResultsView(ft.Column):
+    GROUPS_PER_PAGE = 50
+
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru"):
+        super().__init__()
+        self.all_results = dict(results)
+        self.filtered_results = dict(results)
+        self.on_back = on_back
+        self.on_delete = on_delete
+        self.on_hardlink = on_hardlink
+        self.language = language
+
+        # Global selection state
+        self.selected_paths: Set[str] = set()
+        
+        self.active_category: str = "all"
+        self.search_query: str = ""
+        self.loaded_groups_count: int = 0
+
+        # Filter / sort / view state
+        self.min_size_filter: int = 0
+        self.date_filter: str = "any"
+        self.sort_mode: str = "wasted"
+        self.grid_mode: bool = False
+        self.collapsed_groups: Set[str] = set()
+        
+        self.scroll = ft.ScrollMode.AUTO
+        self.expand = True
+        self.spacing = 14
+
+        # FilePicker for export
+        self.export_picker = ft.FilePicker()
+        self.pending_export_type = "csv"
+
+        # Calculate Overall Stats
+        self.total_groups = len(results)
+        self.total_dupe_files = sum(max(0, len(files) - 1) for files in results.values())
+        self.total_wasted_bytes = sum(max(0, len(files) - 1) * files[0].size for files in results.values() if files)
+
+        # Count and Size by Categories
+        self.category_counts = {"all": self.total_groups}
+        self.category_wasted = {}
+        for files in results.values():
+            if files:
+                cat = files[0].category
+                self.category_counts[cat] = self.category_counts.get(cat, 0) + 1
+                wasted = max(0, len(files) - 1) * files[0].size
+                self.category_wasted[cat] = self.category_wasted.get(cat, 0) + wasted
+
+        # UI Components
+        self.search_field = ft.TextField(
+            hint_text=get_text("search_placeholder", self.language),
+            prefix_icon=ft.Icons.SEARCH_ROUNDED,
+            bgcolor=SURFACE_HOVER,
+            border_color=BORDER_COLOR,
+            text_size=13,
+            height=40,
+            expand=True,
+            on_change=self.on_search_change
+        )
+
+        self.size_filter_dropdown = ft.Dropdown(
+            label=get_text("flt_size_label", self.language),
+            width=160,
+            text_size=12,
+            border_color=BORDER_COLOR,
+            bgcolor=SURFACE_HOVER,
+            value="0",
+            options=[
+                ft.dropdown.Option("0", get_text("flt_size_any", self.language)),
+                ft.dropdown.Option(str(1024 ** 2), get_text("flt_size_gt1", self.language)),
+                ft.dropdown.Option(str(10 * 1024 ** 2), get_text("flt_size_gt10", self.language)),
+                ft.dropdown.Option(str(100 * 1024 ** 2), get_text("flt_size_gt100", self.language)),
+                ft.dropdown.Option(str(1024 ** 3), get_text("flt_size_gt1gb", self.language)),
+            ],
+            on_select=self.on_filter_changed
+        )
+
+        self.date_filter_dropdown = ft.Dropdown(
+            label=get_text("flt_date_label", self.language),
+            width=180,
+            text_size=12,
+            border_color=BORDER_COLOR,
+            bgcolor=SURFACE_HOVER,
+            value="any",
+            options=[
+                ft.dropdown.Option("any", get_text("flt_date_any", self.language)),
+                ft.dropdown.Option("year", get_text("flt_date_year", self.language)),
+                ft.dropdown.Option("older", get_text("flt_date_older", self.language)),
+            ],
+            on_select=self.on_filter_changed
+        )
+
+        self.sort_dropdown = ft.Dropdown(
+            label=get_text("flt_sort_label", self.language),
+            width=200,
+            text_size=12,
+            border_color=BORDER_COLOR,
+            bgcolor=SURFACE_HOVER,
+            value="wasted",
+            options=[
+                ft.dropdown.Option("wasted", get_text("flt_sort_wasted", self.language)),
+                ft.dropdown.Option("count", get_text("flt_sort_count", self.language)),
+                ft.dropdown.Option("size", get_text("flt_sort_size", self.language)),
+            ],
+            on_select=self.on_filter_changed
+        )
+
+        self.grid_toggle_btn = get_action_icon_button(
+            icon=ft.Icons.GRID_VIEW_ROUNDED if not self.grid_mode else ft.Icons.VIEW_LIST_ROUNDED,
+            icon_color=TEXT_MUTED,
+            tooltip=get_text("view_grid" if not self.grid_mode else "view_list", self.language),
+            on_click=self.on_grid_toggle,
+            icon_size=20,
+            button_size=34
+        )
+
+        self.smart_select_dropdown = ft.Dropdown(
+            label=get_text("smart_select", self.language),
+            width=240,
+            text_size=12,
+            border_color=BORDER_COLOR,
+            bgcolor=SURFACE_HOVER,
+            options=[
+                ft.dropdown.Option("first", get_text("select_all_except_first", self.language)),
+                ft.dropdown.Option("last", get_text("select_all_except_last", self.language)),
+                ft.dropdown.Option("shortest", get_text("select_shortest_path", self.language)),
+                ft.dropdown.Option("all", get_text("select_all", self.language)),
+                ft.dropdown.Option("none", get_text("deselect_all", self.language)),
+                ft.dropdown.Option("invert", get_text("invert_selection", self.language)),
+            ],
+            on_select=self.apply_smart_selection
+        )
+
+        self.delete_btn = get_primary_button(
+            text=f"{get_text('delete_selected', self.language)} (0)",
+            on_click=self.on_delete_clicked,
+            icon=ft.Icons.DELETE_SWEEP_ROUNDED,
+            bgcolor=DANGER_COLOR,
+            height=40
+        )
+
+        self.hardlink_btn = get_primary_button(
+            text=get_text("hardlink_selected", self.language),
+            on_click=self.on_hardlink_clicked,
+            icon=ft.Icons.LINK_ROUNDED,
+            bgcolor=PRIMARY_COLOR,
+            height=40
+        )
+
+        self.category_chips_row = ft.Row(spacing=6, scroll=ft.ScrollMode.AUTO)
+        self.results_column = ft.Column(spacing=10)
+        
+        self.load_more_btn = get_outlined_button(
+            text=get_text("load_more", self.language),
+            on_click=self.load_more_groups,
+            icon=ft.Icons.EXPAND_MORE_ROUNDED,
+            height=38
+        )
+        self.progress_counter_text = ft.Text("", size=12, color=TEXT_MUTED)
+        self.operation_progress = ft.ProgressBar(value=0, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
+        self.operation_status = ft.Text("", size=12, color=TEXT_SECONDARY, visible=False)
+
+        self.select_default_duplicates()
+        self.build_ui()
+        self.refresh_filtered_results()
+
+    def select_default_duplicates(self):
+        self.selected_paths.clear()
+        for files in self.all_results.values():
+            for i, f in enumerate(files):
+                if i > 0:
+                    self.selected_paths.add(f.path)
+
+    def build_master_kpi_strip(self) -> ft.Container:
+        """Compact horizontal master KPI status strip."""
+        theme = get_current_theme()
+        selected_size = sum(
+            f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
+        )
+
+        kpis = [
+            get_kpi_badge(ft.Icons.DELETE_SWEEP_ROUNDED, get_text("wasted_space", self.language), format_file_size(self.total_wasted_bytes), color=DANGER_COLOR),
+            get_kpi_badge(ft.Icons.FOLDER_ZIP_OUTLINED, get_text("duplicate_groups", self.language), str(self.total_groups), color=PRIMARY_COLOR),
+            get_kpi_badge(ft.Icons.CONTENT_COPY_ROUNDED, get_text("duplicate_files_count", self.language), str(self.total_dupe_files), color=INFO_COLOR),
+            get_kpi_badge(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, f"{get_text('kpi_selected', self.language)}:", f"{len(self.selected_paths)} ({format_file_size(selected_size)})", color=SUCCESS_COLOR),
+        ]
+
+        # Compact category distribution dots
+        cat_dots = []
+        if self.total_wasted_bytes > 0:
+            for cat, wasted in self.category_wasted.items():
+                if wasted > 0:
+                    pct = (wasted / self.total_wasted_bytes) * 100
+                    _, cat_color = CATEGORY_ICONS.get(cat, CATEGORY_ICONS["other"])
+                    cat_dots.append(
+                        ft.Row([
+                            ft.Container(width=8, height=8, bgcolor=cat_color, border_radius=2),
+                            ft.Text(f"{get_text(f'filter_{cat}', self.language)} {pct:.0f}%", size=10, color=TEXT_MUTED)
+                        ], spacing=4)
+                    )
+
+        return get_styled_card(
+            ft.Row([
+                ft.Row(kpis, spacing=8, wrap=True, expand=True),
+                ft.Row(cat_dots, spacing=10, wrap=True) if cat_dots else ft.Container()
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=10
+        )
+
+    def build_ui(self):
+        theme = get_current_theme()
+        chips = []
+        categories = ["all", "images", "videos", "audio", "documents", "archives", "code", "other"]
+        for cat in categories:
+            count = self.category_counts.get(cat, 0)
+            if cat != "all" and count == 0:
+                continue
+            is_active = (cat == self.active_category)
+            chips.append(
+                ft.Container(
+                    content=ft.Row([
+                        ft.Text(get_text(f"filter_{cat}", self.language), size=12, color="#FFFFFF" if is_active else theme["TEXT_SECONDARY"], weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL),
+                        ft.Container(
+                            content=ft.Text(str(count), size=10, color="#FFFFFF" if is_active else theme["TEXT_MUTED"]),
+                            bgcolor=f"{theme['PRIMARY_LIGHT']}44" if is_active else theme["SURFACE_HOVER"],
+                            border_radius=10,
+                            padding=ft.Padding.symmetric(horizontal=6, vertical=1)
+                        )
+                    ], spacing=6),
+                    bgcolor=theme["PRIMARY_COLOR"] if is_active else theme["SURFACE_CARD"],
+                    border=ft.Border.all(1, theme["PRIMARY_COLOR"] if is_active else theme["BORDER_COLOR"]),
+                    border_radius=16,
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                    on_click=lambda _, c=cat: self.on_category_selected(c)
+                )
+            )
+        self.category_chips_row.controls = chips
+
+        self.controls = [
+            # Header Row
+            get_header_row(
+                title=get_text("scan_results", self.language),
+                subtitle=f"{self.total_groups} {get_text('duplicate_groups', self.language)}",
+                action_control=ft.Row([
+                    get_outlined_button(
+                        text=get_text("back_to_search", self.language),
+                        on_click=lambda _: self.on_back(),
+                        icon=ft.Icons.ARROW_BACK_ROUNDED,
+                        height=38
+                    ),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.DOWNLOAD_ROUNDED,
+                        tooltip=get_text("export_report", self.language),
+                        items=[
+                            ft.PopupMenuItem(content=ft.Text(get_text("export_csv", self.language)), on_click=functools.partial(self.trigger_export, "csv")),
+                            ft.PopupMenuItem(content=ft.Text(get_text("export_json", self.language)), on_click=functools.partial(self.trigger_export, "json")),
+                            ft.PopupMenuItem(content=ft.Text(get_text("export_txt", self.language)), on_click=functools.partial(self.trigger_export, "txt")),
+                        ]
+                    )
+                ], spacing=8)
+            ),
+
+            # Master KPI Status Strip
+            self.build_master_kpi_strip(),
+
+            # Command Deck: Search, Filters, Smart Select & Primary Action Buttons
+            get_styled_card(
+                ft.Column([
+                    ft.Row([
+                        self.search_field,
+                        self.smart_select_dropdown,
+                        self.hardlink_btn,
+                        self.delete_btn
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True, spacing=8),
+                    self.category_chips_row,
+                    ft.Row([
+                        self.size_filter_dropdown,
+                        self.date_filter_dropdown,
+                        self.sort_dropdown,
+                        self.grid_toggle_btn
+                    ], spacing=10, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                ], spacing=10)
+            ),
+
+            # Group Cards Column
+            self.results_column,
+
+            # Operation Progress (delete/hardlink)
+            ft.Container(
+                content=ft.Column([
+                    self.operation_progress,
+                    self.operation_status
+                ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                visible=True, padding=0
+            ),
+
+            # Load More / Progress Row
+            ft.Row([
+                self.progress_counter_text,
+                self.load_more_btn
+            ], alignment=ft.MainAxisAlignment.CENTER, spacing=16)
+        ]
+
+    def on_grid_toggle(self, e):
+        self.grid_mode = not self.grid_mode
+        self.grid_toggle_btn.content.icon = ft.Icons.VIEW_LIST_ROUNDED if self.grid_mode else ft.Icons.GRID_VIEW_ROUNDED
+        self.grid_toggle_btn.tooltip = get_text("view_list" if self.grid_mode else "view_grid", self.language)
+        self.results_column.controls.clear()
+        self.loaded_groups_count = 0
+        self.load_more_groups(None)
+        self.update()
+
+    def on_filter_changed(self, e):
+        try:
+            self.min_size_filter = int(self.size_filter_dropdown.value or 0)
+        except ValueError:
+            self.min_size_filter = 0
+        self.date_filter = self.date_filter_dropdown.value or "any"
+        self.sort_mode = self.sort_dropdown.value or "wasted"
+        self.refresh_filtered_results()
+
+    def on_category_selected(self, category: str):
+        self.active_category = category
+        self.build_ui()
+        self.refresh_filtered_results()
+
+    def on_search_change(self, e):
+        self.search_query = self.search_field.value.lower().strip()
+        self.refresh_filtered_results()
+
+    def refresh_filtered_results(self):
+        now = datetime.datetime.now().timestamp()
+        filtered = {}
+
+        for key, files in self.all_results.items():
+            if not files:
+                continue
+
+            if self.active_category != "all":
+                if files[0].category != self.active_category:
+                    continue
+
+            if self.search_query:
+                matches_search = any(
+                    self.search_query in f.name.lower() or self.search_query in f.path.lower()
+                    for f in files
+                )
+                if not matches_search:
+                    continue
+
+            if self.min_size_filter > 0 and files[0].size < self.min_size_filter:
+                continue
+
+            if self.date_filter != "any":
+                newest = max(f.modified for f in files)
+                one_year_ago = now - 365 * 86400
+                if self.date_filter == "year" and newest < one_year_ago:
+                    continue
+                elif self.date_filter == "older" and newest >= one_year_ago:
+                    continue
+
+            filtered[key] = files
+
+        # Sort groups
+        items = list(filtered.items())
+        if self.sort_mode == "wasted":
+            items.sort(key=lambda kv: max(0, len(kv[1]) - 1) * (kv[1][0].size if kv[1] else 0), reverse=True)
+        elif self.sort_mode == "count":
+            items.sort(key=lambda kv: len(kv[1]), reverse=True)
+        elif self.sort_mode == "size":
+            items.sort(key=lambda kv: kv[1][0].size if kv[1] else 0, reverse=True)
+
+        self.filtered_results = dict(items)
+        self.loaded_groups_count = 0
+        self.results_column.controls.clear()
+        self.load_more_groups(None)
+        self.update_action_button_texts()
+        if self.parent:
+            try:
+                self.update()
+            except Exception:
+                pass
+
+    def load_more_groups(self, e):
+        items = list(self.filtered_results.items())
+        start = self.loaded_groups_count
+        end = min(start + self.GROUPS_PER_PAGE, len(items))
+
+        for key, files in items[start:end]:
+            self.results_column.controls.append(self.build_group_card(key, files))
+
+        self.loaded_groups_count = end
+        total_filtered = len(items)
+
+        self.progress_counter_text.value = get_text("showing_groups", self.language).format(self.loaded_groups_count, total_filtered)
+        self.load_more_btn.visible = self.loaded_groups_count < total_filtered
+
+        if e and self.parent:
+            try:
+                self.update()
+            except Exception:
+                pass
+
+    def toggle_group_collapse(self, key: str):
+        if key in self.collapsed_groups:
+            self.collapsed_groups.remove(key)
+        else:
+            self.collapsed_groups.add(key)
+        self.results_column.controls.clear()
+        items = list(self.filtered_results.items())[:self.loaded_groups_count]
+        for k, files in items:
+            self.results_column.controls.append(self.build_group_card(k, files))
+        self.update()
+
+    def build_group_card(self, key: str, files: List[FileInfo]) -> ft.Container:
+        cat = files[0].category if files else "other"
+        cat_icon, cat_color = CATEGORY_ICONS.get(cat, CATEGORY_ICONS["other"])
+        file_size_str = format_file_size(files[0].size) if files else "0 B"
+        wasted_for_group = format_file_size(max(0, len(files) - 1) * files[0].size) if files else "0 B"
+
+        is_collapsed = key in self.collapsed_groups
+
+        header_actions = [
+            ft.Icon(cat_icon, color=cat_color, size=20),
+            ft.Text(files[0].name if files else key, size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, expand=True),
+            get_badge(f"{len(files)} {get_text('files', self.language)}", color=PRIMARY_COLOR),
+            get_badge(f"{file_size_str}", color=INFO_COLOR),
+            get_badge(f"-{wasted_for_group}", color=DANGER_COLOR),
+        ]
+
+        if cat == "images" and len(files) >= 2:
+            header_actions.append(
+                get_action_icon_button(
+                    icon=ft.Icons.COMPARE_ROUNDED,
+                    icon_color=PRIMARY_COLOR,
+                    tooltip=get_text("compare_photos_btn", self.language),
+                    on_click=lambda _, f=files: self.show_side_by_side_comparison(f)
+                )
+            )
+
+        header_actions.append(
+            get_action_icon_button(
+                icon=ft.Icons.EXPAND_LESS_ROUNDED if not is_collapsed else ft.Icons.EXPAND_MORE_ROUNDED,
+                icon_color=TEXT_MUTED,
+                tooltip="Collapse / Expand",
+                on_click=lambda _, k=key: self.toggle_group_collapse(k)
+            )
+        )
+
+        content_list = [
+            ft.Row(header_actions, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ft.Divider(color=BORDER_COLOR, height=1),
+        ]
+
+        if not is_collapsed:
+            if self.grid_mode and cat == "images":
+                content_list.append(self.build_image_grid(files))
+            else:
+                for i, file in enumerate(files):
+                    is_sys = is_system_path(file.path)
+                    is_selected = file.path in self.selected_paths
+                    content_list.append(self.build_file_row(file, i, is_sys, is_selected, files))
+
+        return get_styled_card(
+            ft.Column(content_list, spacing=8),
+            padding=12
+        )
+
+    def build_file_row(self, file: FileInfo, index: int, is_sys: bool, is_selected: bool, group_files: List[FileInfo]) -> ft.Container:
+        cb = ft.Checkbox(
+            value=is_selected,
+            on_change=lambda e, p=file.path: self.on_checkbox_toggle(p, e.control.value)
+        )
+
+        thumbnail_widget = None
+        if file.category == "images" and os.path.exists(file.path):
+            try:
+                thumbnail_widget = ft.Container(
+                    content=ft.Image(
+                        src=file.path,
+                        width=38,
+                        height=38,
+                        fit=ft.BoxFit.COVER,
+                        border_radius=6,
+                        error_content=ft.Icon(ft.Icons.BROKEN_IMAGE_ROUNDED, size=20, color=TEXT_MUTED)
+                    ),
+                    border_radius=6,
+                    border=ft.Border.all(1, BORDER_COLOR),
+                    on_click=lambda _, p=file.path: self.show_image_lightbox(p)
+                )
+            except Exception:
+                thumbnail_widget = None
+
+        mod_date_str = datetime.datetime.fromtimestamp(file.modified).strftime("%Y-%m-%d %H:%M")
+        drive_letter = os.path.splitdrive(file.path)[0]
+        short_p = format_path_short(file.path, max_chars=65)
+
+        badge_status = get_badge(get_text("original_first", self.language), color=SUCCESS_COLOR) if index == 0 else get_badge(get_text("duplicate_label", self.language), color=DANGER_COLOR)
+        
+        info_col = ft.Column([
+            ft.Row([
+                get_badge(drive_letter, color=PRIMARY_COLOR) if drive_letter else ft.Container(),
+                ft.Text(short_p, size=13, color=DANGER_COLOR if is_sys else TEXT_PRIMARY, weight=ft.FontWeight.W_500, expand=True, tooltip=file.path),
+                badge_status,
+                get_badge(get_text("system_file", self.language), color=DANGER_COLOR, icon=ft.Icons.SECURITY_ROUNDED) if is_sys else ft.Container()
+            ]),
+            ft.Row([
+                ft.Text(f"{get_text('modified', self.language)}: {mod_date_str}", size=11, color=TEXT_MUTED),
+                ft.Text(f"• {format_file_size(file.size)}", size=11, color=TEXT_MUTED),
+            ], spacing=6)
+        ], spacing=2, expand=True)
+
+        action_buttons = ft.Row([
+            get_action_icon_button(
+                icon=ft.Icons.FOLDER_OPEN_ROUNDED,
+                tooltip=get_text("open_folder", self.language),
+                on_click=lambda _, p=file.path: self.open_in_explorer(p)
+            ),
+            get_action_icon_button(
+                icon=ft.Icons.OPEN_IN_NEW_ROUNDED,
+                tooltip=get_text("open_file", self.language),
+                on_click=lambda _, p=file.path: self.open_file_natively(p)
+            ),
+        ], spacing=4)
+
+        row_content = [cb]
+        if thumbnail_widget:
+            row_content.append(thumbnail_widget)
+        row_content.extend([info_col, action_buttons])
+
+        return ft.Container(
+            content=ft.Row(row_content, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=f"{PRIMARY_COLOR}12" if is_selected else (SURFACE_HOVER if index % 2 == 0 else "transparent"),
+            border=ft.Border.all(1, f"{PRIMARY_COLOR}35" if is_selected else "transparent"),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6)
+        )
+
+    def build_image_grid(self, files: List[FileInfo]) -> ft.Row:
+        tiles = []
+        for i, file in enumerate(files):
+            is_selected = file.path in self.selected_paths
+            is_sys = is_system_path(file.path)
+            tiles.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Stack([
+                            ft.Image(
+                                src=file.path,
+                                width=150,
+                                height=100,
+                                fit=ft.BoxFit.COVER,
+                                border_radius=6,
+                                error_content=ft.Icon(ft.Icons.BROKEN_IMAGE_ROUNDED, size=24, color=TEXT_MUTED)
+                            ),
+                            ft.Container(
+                                content=ft.Checkbox(
+                                    value=is_selected,
+                                    on_change=lambda e, p=file.path: self.on_checkbox_toggle(p, e.control.value)
+                                ),
+                                top=4,
+                                left=4
+                            ),
+                            ft.Container(
+                                content=get_badge(get_text("original_first", self.language) if i == 0 else get_text("duplicate_label", self.language), color=SUCCESS_COLOR if i == 0 else DANGER_COLOR),
+                                top=4,
+                                right=4
+                            )
+                        ]),
+                        ft.Text(os.path.basename(file.path), size=11, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(format_file_size(file.size), size=10, color=TEXT_MUTED),
+                    ], spacing=3, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    bgcolor=SURFACE_HOVER,
+                    border=ft.Border.all(1, DANGER_COLOR if is_sys else (PRIMARY_COLOR if is_selected else BORDER_COLOR)),
+                    border_radius=8,
+                    padding=6,
+                    on_click=lambda _, p=file.path: self.show_image_lightbox(p)
+                )
+            )
+        return ft.Row(tiles, wrap=True, spacing=8)
+
+    def on_checkbox_toggle(self, path: str, value: bool):
+        if value:
+            self.selected_paths.add(path)
+        else:
+            self.selected_paths.discard(path)
+        self.update_action_button_texts()
+
+    def update_action_button_texts(self):
+        count = len(self.selected_paths)
+        total_size = sum(
+            f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
+        )
+        size_str = format_file_size(total_size)
+        self.delete_btn.content = ft.Row([
+            ft.Icon(ft.Icons.DELETE_SWEEP_ROUNDED, size=18, color="#FFFFFF"),
+            ft.Text(f"{get_text('delete_selected', self.language)} ({count} • {size_str})", color="#FFFFFF", weight=ft.FontWeight.W_600)
+        ], spacing=6, alignment=ft.MainAxisAlignment.CENTER)
+        self.hardlink_btn.content = ft.Row([
+            ft.Icon(ft.Icons.LINK_ROUNDED, size=18, color="#FFFFFF"),
+            ft.Text(f"{get_text('hardlink_selected', self.language)} ({count})", color="#FFFFFF", weight=ft.FontWeight.W_600)
+        ], spacing=6, alignment=ft.MainAxisAlignment.CENTER)
+        if self.parent:
+            try:
+                self.delete_btn.update()
+                self.hardlink_btn.update()
+            except Exception:
+                pass
+
+    def apply_smart_selection(self, e):
+        rule = self.smart_select_dropdown.value
+        if rule == "invert":
+            all_files_in_filtered = {f.path for files in self.filtered_results.values() for f in files}
+            self.selected_paths = all_files_in_filtered - self.selected_paths
+        else:
+            self.selected_paths.clear()
+            for files in self.filtered_results.values():
+                if len(files) <= 1:
+                    continue
+
+                if rule == "first":
+                    for f in files[1:]:
+                        self.selected_paths.add(f.path)
+                elif rule == "last":
+                    for f in files[:-1]:
+                        self.selected_paths.add(f.path)
+                elif rule == "shortest":
+                    shortest = min(files, key=lambda x: len(x.path))
+                    for f in files:
+                        if f.path != shortest.path:
+                            self.selected_paths.add(f.path)
+                elif rule == "all":
+                    for f in files:
+                        self.selected_paths.add(f.path)
+                elif rule == "none":
+                    pass
+
+        self.results_column.controls.clear()
+        items = list(self.filtered_results.items())[:self.loaded_groups_count]
+        for key, files in items:
+            self.results_column.controls.append(self.build_group_card(key, files))
+
+        self.update_action_button_texts()
+        try:
+            self.update()
+        except Exception:
+            pass
+
+    def show_side_by_side_comparison(self, files: List[FileInfo]):
+        if not self.page or len(files) < 2:
+            return
+
+        file_a = files[0]
+        file_b = files[1]
+
+        def get_img_dims(path):
+            try:
+                with Image.open(path) as im:
+                    return f"{im.width} × {im.height} px"
+            except Exception:
+                return "Unknown"
+
+        dims_a = get_img_dims(file_a.path)
+        dims_b = get_img_dims(file_b.path)
+
+        def keep_a(e):
+            self.selected_paths.discard(file_a.path)
+            self.selected_paths.add(file_b.path)
+            self.update_action_button_texts()
+            self.page.pop_dialog()
+            self.refresh_filtered_results()
+
+        def keep_b(e):
+            self.selected_paths.discard(file_b.path)
+            self.selected_paths.add(file_a.path)
+            self.update_action_button_texts()
+            self.page.pop_dialog()
+            self.refresh_filtered_results()
+
+        card_a = ft.Container(
+            content=ft.Column([
+                ft.Text(get_text("photo_left_title", self.language), weight=ft.FontWeight.BOLD, color=SUCCESS_COLOR),
+                ft.Image(src=file_a.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6),
+                ft.Text(os.path.basename(file_a.path), size=12, weight=ft.FontWeight.BOLD),
+                ft.Text(f"{get_text('dimensions', self.language)}: {dims_a}", size=11, color=TEXT_MUTED),
+                ft.Text(f"{get_text('size', self.language)}: {format_file_size(file_a.size)}", size=11, color=TEXT_MUTED),
+                get_primary_button(text=get_text("keep_left_btn", self.language), on_click=keep_a, bgcolor=SUCCESS_COLOR, height=36)
+            ], spacing=6),
+            padding=10,
+            bgcolor=SURFACE_HOVER,
+            border_radius=8,
+            expand=True
+        )
+
+        card_b = ft.Container(
+            content=ft.Column([
+                ft.Text(get_text("photo_right_title", self.language), weight=ft.FontWeight.BOLD, color=PRIMARY_COLOR),
+                ft.Image(src=file_b.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6),
+                ft.Text(os.path.basename(file_b.path), size=12, weight=ft.FontWeight.BOLD),
+                ft.Text(f"{get_text('dimensions', self.language)}: {dims_b}", size=11, color=TEXT_MUTED),
+                ft.Text(f"{get_text('size', self.language)}: {format_file_size(file_b.size)}", size=11, color=TEXT_MUTED),
+                get_primary_button(text=get_text("keep_right_btn", self.language), on_click=keep_b, bgcolor=PRIMARY_COLOR, height=36)
+            ], spacing=6),
+            padding=10,
+            bgcolor=SURFACE_HOVER,
+            border_radius=8,
+            expand=True
+        )
+
+        dlg = get_styled_dialog(
+            title=get_text("compare_modal_title", self.language),
+            icon=ft.Icons.COMPARE_ROUNDED,
+            icon_color=PRIMARY_COLOR,
+            content=ft.Container(
+                content=ft.Row([card_a, card_b], spacing=12),
+                width=720,
+                height=420
+            ),
+            actions=[
+                get_outlined_button(text=get_text("close", self.language), on_click=lambda _: self.page.pop_dialog())
+            ]
+        )
+        self.page.show_dialog(dlg)
+
+    def show_image_lightbox(self, image_path: str):
+        if not self.page:
+            return
+
+        def close_modal(e):
+            self.page.pop_dialog()
+
+        dlg = get_styled_dialog(
+            title=os.path.basename(image_path),
+            icon=ft.Icons.IMAGE_ROUNDED,
+            icon_color=PRIMARY_COLOR,
+            content=ft.Container(
+                content=ft.Image(src=image_path, fit=ft.BoxFit.CONTAIN),
+                width=600,
+                height=450,
+            ),
+            actions=[
+                get_outlined_button(text=get_text("close", self.language), on_click=close_modal),
+                get_primary_button(text=get_text("open_file", self.language), on_click=lambda _: self.open_file_natively(image_path), icon=ft.Icons.OPEN_IN_NEW_ROUNDED)
+            ]
+        )
+        self.page.show_dialog(dlg)
+
+    def open_file_natively(self, path: str):
+        try:
+            os.startfile(path)
+        except Exception as ex:
+            print(f"Error opening file: {ex}")
+
+    def open_in_explorer(self, path: str):
+        try:
+            os.startfile(os.path.dirname(path))
+        except Exception as ex:
+            print(f"Error opening directory: {ex}")
+
+    def on_delete_clicked(self, e):
+        if not self.selected_paths:
+            return
+
+        selected_list = list(self.selected_paths)
+        system_files = [p for p in selected_list if is_system_path(p)]
+        total_size = sum(
+            f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
+        )
+
+        def confirm_delete(use_trash: bool):
+            self.page.pop_dialog()
+            # Show progress bar
+            self.operation_progress.visible = True
+            self.operation_progress.value = 0
+            self.operation_status.visible = True
+            self.operation_status.value = get_text("deleting", self.language).format(0, len(selected_list))
+            try:
+                self.update()
+            except Exception:
+                pass
+            self.on_delete(selected_list, use_trash=use_trash)
+
+        def cancel_dialog(e):
+            self.page.pop_dialog()
+
+        trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=True)
+
+        content_controls = [
+            ft.Text(get_text("delete_summary_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),
+            trash_checkbox
+        ]
+
+        if system_files:
+            sys_summary = "\n".join([f"• {os.path.basename(f)}" for f in system_files[:4]])
+            if len(system_files) > 4:
+                sys_summary += f"\n... (+{len(system_files) - 4} more)"
+            content_controls.insert(0, 
+                ft.Container(
+                    content=ft.Text(get_text("system_delete_warning", self.language).format(sys_summary), color=DANGER_COLOR, size=12),
+                    bgcolor=f"{DANGER_COLOR}22",
+                    padding=10,
+                    border_radius=8
+                )
+            )
+
+        dlg = get_styled_dialog(
+            title=get_text("confirm_deletion_title", self.language),
+            icon=ft.Icons.DELETE_FOREVER_ROUNDED,
+            icon_color=DANGER_COLOR,
+            content=ft.Column(content_controls, tight=True, spacing=12),
+            actions=[
+                get_outlined_button(text=get_text("cancel", self.language), on_click=cancel_dialog),
+                get_primary_button(
+                    text=get_text("delete", self.language),
+                    on_click=lambda _: confirm_delete(use_trash=trash_checkbox.value),
+                    bgcolor=DANGER_COLOR,
+                    icon=ft.Icons.DELETE_ROUNDED
+                )
+            ]
+        )
+        self.page.show_dialog(dlg)
+
+    def on_hardlink_clicked(self, e):
+        if not self.selected_paths or not self.on_hardlink:
+            return
+
+        selected_list = list(self.selected_paths)
+        total_size = sum(
+            f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
+        )
+
+        def confirm_hardlink(_):
+            self.page.pop_dialog()
+            # Show progress bar
+            self.operation_progress.visible = True
+            self.operation_progress.value = 0
+            self.operation_status.visible = True
+            self.operation_status.value = get_text("hardlinking", self.language).format(0, len(selected_list))
+            try:
+                self.update()
+            except Exception:
+                pass
+            groups_map = {}
+            for files in self.all_results.values():
+                if not files:
+                    continue
+                original = files[0].path
+                dupes = [f.path for f in files[1:] if f.path in self.selected_paths]
+                if dupes:
+                    groups_map[original] = dupes
+
+            self.on_hardlink(groups_map)
+
+        dlg = get_styled_dialog(
+            title=get_text("hardlink_confirm_title", self.language),
+            icon=ft.Icons.LINK_ROUNDED,
+            icon_color=PRIMARY_COLOR,
+            content=ft.Text(get_text("hardlink_confirm_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),
+            actions=[
+                get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: self.page.pop_dialog()),
+                get_primary_button(
+                    text=get_text("hardlink_selected", self.language),
+                    on_click=confirm_hardlink,
+                    bgcolor=PRIMARY_COLOR,
+                    icon=ft.Icons.LINK_ROUNDED
+                )
+            ]
+        )
+        self.page.show_dialog(dlg)
+
+    def remove_files(self, removed_paths: List[str]):
+        removed_set = set(removed_paths)
+        self.selected_paths -= removed_set
+
+        new_all_results = {}
+        for key, files in self.all_results.items():
+            remaining = [f for f in files if f.path not in removed_set]
+            if len(remaining) > 1:
+                new_all_results[key] = remaining
+
+        self.all_results = new_all_results
+        self.total_groups = len(self.all_results)
+        self.total_dupe_files = sum(max(0, len(files) - 1) for files in self.all_results.values())
+        self.total_wasted_bytes = sum(max(0, len(files) - 1) * files[0].size for files in self.all_results.values() if files)
+
+        self.category_counts = {"all": self.total_groups}
+        for files in self.all_results.values():
+            if files:
+                cat = files[0].category
+                self.category_counts[cat] = self.category_counts.get(cat, 0) + 1
+
+        self.build_ui()
+        self.refresh_filtered_results()
+
+    async def trigger_export(self, export_type: str):
+        self.pending_export_type = export_type
+        save_path = await self.export_picker.save_file(
+            dialog_title=get_text(f"export_{export_type}", self.language),
+            file_name=f"duplicates_report.{export_type}",
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=[export_type]
+        )
+        if save_path:
+            self.write_export_file(save_path, export_type)
+
+    def write_export_file(self, path: str, export_type: str):
+        try:
+            if export_type == "csv":
+                with open(path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Group", "File Name", "Path", "Size (bytes)", "Size (formatted)", "Modified", "Category"])
+                    for key, files in self.all_results.items():
+                        for file in files:
+                            writer.writerow([
+                                key,
+                                file.name,
+                                file.path,
+                                file.size,
+                                format_file_size(file.size),
+                                datetime.datetime.fromtimestamp(file.modified).strftime("%Y-%m-%d %H:%M:%S"),
+                                file.category
+                            ])
+            elif export_type == "json":
+                data = {
+                    "total_groups": self.total_groups,
+                    "wasted_space": self.total_wasted_bytes,
+                    "groups": {
+                        k: [{"name": f.name, "path": f.path, "size": f.size, "modified": f.modified, "category": f.category} for f in files]
+                        for k, files in self.all_results.items()
+                    }
+                }
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+            elif export_type == "txt":
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(f"DUPLICATER REPORT - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+                    f.write(f"Total Duplicate Groups: {self.total_groups}\n")
+                    f.write(f"Wasted Space: {format_file_size(self.total_wasted_bytes)}\n\n")
+                    for key, files in self.all_results.items():
+                        f.write(f"=== Group: {key} ({len(files)} files, {format_file_size(files[0].size)} each) ===\n")
+                        for file in files:
+                            f.write(f"  - {file.path}\n")
+                        f.write("\n")
+        except Exception as ex:
+            print(f"Export error: {ex}")
