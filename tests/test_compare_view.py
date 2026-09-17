@@ -3,6 +3,8 @@ CompareView.show_error). A failed comparison must surface as an error state —
 the old code raised TypeError inside the error handler and then rendered the
 failure as an empty "no common files" result."""
 
+import flet as ft
+
 from ui.compare_view import CompareView
 
 
@@ -39,3 +41,20 @@ class TestCompareErrorDisplay:
         received["error_cb"]("boom")
         assert "boom" in view.status_text.value
         assert view.progress_bar.visible is False
+
+
+class TestTabReset:
+    def test_show_results_resets_to_common_tab(self, tmp_path, monkeypatch):
+        # The previous comparison's tab choice must not leak into a new one.
+        view = make_compare_view()
+        view.folder_a = str(tmp_path)
+        view.folder_b = str(tmp_path)
+        # flet's Control.parent is a read-only property; shadow it with a real
+        # (unmounted) control so show_results does not take its early-return
+        # while page resolution still fails the guarded way.
+        monkeypatch.setattr(type(view), "parent", property(lambda self: ft.Container()))
+        view.active_tab = "unique_b"
+
+        view.show_results({"unique_a": [], "unique_b": [], "common": [], "total_files": 0})
+
+        assert view.active_tab == "common"

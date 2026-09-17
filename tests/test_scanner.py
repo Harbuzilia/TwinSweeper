@@ -543,3 +543,33 @@ class TestExcludePatternMatching:
         )
         paths = {f.path for files in results.values() for f in files}
         assert paths == {str(tmp_path / "keep.txt"), str(tmp_path / "app.logger.txt")}
+
+
+class TestCompareCaseInsensitive:
+    """Round 2: Windows paths are case-insensitive — without normcase keys,
+    Report.PDF vs report.pdf read as two different files, each "unique"."""
+
+    def test_case_only_difference_is_common(self, tmp_path):
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        (a / "Report.PDF").write_bytes(b"same data")
+        (b / "report.pdf").write_bytes(b"same data")
+
+        result = compare_folders(str(a), str(b))
+
+        assert result["unique_a"] == []
+        assert result["unique_b"] == []
+        assert len(result["common"]) == 1
+        assert result["common"][0]["similarity"] == 1.0
+
+
+class TestCandidateScaleReport:
+    def test_candidate_groups_reported_before_hashing(self, dup_tree):
+        messages = []
+        scan_directory(
+            [str(dup_tree)], by_size=True, by_hash=True,
+            use_cache=False, progress_callback=lambda m, p: messages.append(m),
+        )
+        assert any("candidate" in m.lower() for m in messages)

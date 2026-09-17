@@ -17,6 +17,7 @@ from ui.components import (
 )
 from locales import get_text
 from app_logging import get_logger
+from ui.thumbnails import get_cached_thumbnail
 
 logger = get_logger(__name__)
 
@@ -422,6 +423,15 @@ class ResultsView(ft.Column):
         self.loaded_groups_count = 0
         self.results_column.controls.clear()
         self.load_more_groups(None)
+        if not self.filtered_results and self.all_results:
+            # Filters hid everything — an empty column reads as "no results",
+            # which is a different (and misleading) statement.
+            self.results_column.controls.append(
+                ft.Container(
+                    content=ft.Text(get_text("no_match_filters", self.language), color=TEXT_MUTED, size=13),
+                    padding=20
+                )
+            )
         self.update_action_button_texts()
         if self.parent:
             try:
@@ -525,7 +535,9 @@ class ResultsView(ft.Column):
             try:
                 thumbnail_widget = ft.Container(
                     content=ft.Image(
-                        src=file.path,
+                        # Cached 160px JPEG instead of the full-size file —
+                        # flet ships the whole src to the client otherwise.
+                        src=get_cached_thumbnail(file.path, file.modified),
                         width=38,
                         height=38,
                         fit=ft.BoxFit.COVER,
@@ -594,7 +606,8 @@ class ResultsView(ft.Column):
                     content=ft.Column([
                         ft.Stack([
                             ft.Image(
-                                src=file.path,
+                                # Cached thumbnail (see build_file_row).
+                                src=get_cached_thumbnail(file.path, file.modified),
                                 width=150,
                                 height=100,
                                 fit=ft.BoxFit.COVER,
@@ -942,7 +955,13 @@ class ResultsView(ft.Column):
                     continue
                 original = files[0].path
                 # (path, size, mtime) snapshots — the worker re-verifies (C2).
-                dupes = [(f.path, f.size, f.modified) for f in files[1:] if f.path in self.selected_paths]
+                # 0-byte files are skipped: hardlinking them frees exactly
+                # nothing and clutters the success stats.
+                dupes = [
+                    (f.path, f.size, f.modified)
+                    for f in files[1:]
+                    if f.path in self.selected_paths and f.size > 0
+                ]
                 if dupes:
                     groups_map[original] = dupes
 
@@ -1006,7 +1025,9 @@ class ResultsView(ft.Column):
     def write_export_file(self, path: str, export_type: str):
         try:
             if export_type == "csv":
-                with open(path, 'w', newline='', encoding='utf-8') as f:
+                # BOM: Excel (the default CSV viewer for this audience) opens
+                # plain utf-8 as ANSI and mangles Cyrillic paths.
+                with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f)
                     writer.writerow(["Group", "File Name", "Path", "Size (bytes)", "Size (formatted)", "Modified", "Category"])
                     for key, files in self.all_results.items():

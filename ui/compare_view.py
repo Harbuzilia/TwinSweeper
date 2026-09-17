@@ -213,6 +213,9 @@ class CompareView(ft.Column):
         self.progress_bar.visible = False
         self.status_text.value = ""
         self.comparison_data = results
+        # A new comparison starts on the summary tab — the previous result's
+        # tab choice must not leak into it.
+        self.active_tab = "common"
 
         unique_a = results["unique_a"]
         unique_b = results["unique_b"]

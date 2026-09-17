@@ -1,6 +1,7 @@
 import os
 import hashlib
 import fnmatch
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable
@@ -285,6 +286,10 @@ def scan_directory(
     if total_candidates == 0:
         return {}
 
+    # Quick win: the user sees the scan's scale BEFORE the expensive
+    # hashing phase starts.
+    report_progress(get_text("scan_candidates_found").format(len(candidate_groups), total_candidates), 0.05)
+
     if not by_hash and not by_name and not by_byte:
         return {str(g[0].size): g for g in candidate_groups}
 
@@ -330,6 +335,7 @@ def scan_directory(
         executor = ThreadPoolExecutor(max_workers=max_workers)
         futures = {executor.submit(compute_hash_for_file, info): info for info in files_to_hash}
         cancelled = False
+        hash_started = time.monotonic()
         for future in as_completed(futures):
             if is_cancelled():
                 cancelled = True
@@ -344,7 +350,14 @@ def scan_directory(
             processed_count += 1
             if processed_count % 50 == 0 or processed_count == total_candidates:
                 pct = 0.1 + (processed_count / total_candidates) * 0.7
-                report_progress(get_text("scan_hashed").format(processed_count, total_candidates), pct)
+                msg = get_text("scan_hashed").format(processed_count, total_candidates)
+                elapsed = time.monotonic() - hash_started
+                if elapsed >= 1.0 and processed_count > 0:
+                    # Quick win: live speed + ETA instead of a bare counter.
+                    speed = processed_count / elapsed
+                    eta = (total_candidates - processed_count) / speed
+                    msg += get_text("scan_eta_suffix").format(int(speed), int(eta))
+                report_progress(msg, pct)
 
         if cancelled:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -561,7 +574,10 @@ def compare_folders(folder_a: str, folder_b: str, progress_callback: Optional[Ca
             try:
                 rel_path = os.path.relpath(path, folder_a)
                 stat = os.stat(path)
-                files_a[rel_path] = FileInfo(path, filename, stat.st_size, stat.st_ctime, stat.st_mtime)
+                # Windows paths are case-insensitive: without normcase,
+                # Report.PDF in A and report.pdf in B read as two different
+                # files — each "unique" on its own side.
+                files_a[os.path.normcase(rel_path)] = FileInfo(path, filename, stat.st_size, stat.st_ctime, stat.st_mtime)
             except (OSError, PermissionError):
                 continue
 
@@ -571,7 +587,7 @@ def compare_folders(folder_a: str, folder_b: str, progress_callback: Optional[Ca
             try:
                 rel_path = os.path.relpath(path, folder_b)
                 stat = os.stat(path)
-                files_b[rel_path] = FileInfo(path, filename, stat.st_size, stat.st_ctime, stat.st_mtime)
+                files_b[os.path.normcase(rel_path)] = FileInfo(path, filename, stat.st_size, stat.st_ctime, stat.st_mtime)
             except (OSError, PermissionError):
                 continue
 
@@ -583,21 +599,21 @@ def compare_folders(folder_a: str, folder_b: str, progress_callback: Optional[Ca
     total = len(all_keys)
     processed = 0
 
-    for rel_path in all_keys:
+    for rel_key in all_keys:
         processed += 1
         if progress_callback and processed % 20 == 0:
             progress_callback(get_text("compare_progress").format(processed, total))
 
-        in_a = rel_path in files_a
-        in_b = rel_path in files_b
+        in_a = rel_key in files_a
+        in_b = rel_key in files_b
 
         if in_a and not in_b:
-            unique_a.append(files_a[rel_path])
+            unique_a.append(files_a[rel_key])
         elif in_b and not in_a:
-            unique_b.append(files_b[rel_path])
+            unique_b.append(files_b[rel_key])
         else:
-            fa = files_a[rel_path]
-            fb = files_b[rel_path]
+            fa = files_a[rel_key]
+            fb = files_b[rel_key]
             similarity = 1.0
             if fa.size != fb.size:
                 similarity = calculate_similarity(fa.path, fb.path)

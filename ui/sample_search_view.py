@@ -178,7 +178,15 @@ class SampleSearchView(ft.Column):
         if not self.sample_path or not os.path.exists(self.sample_path):
             return
 
-        stat = os.stat(self.sample_path)
+        try:
+            stat = os.stat(self.sample_path)
+        except OSError:
+            # The sample vanished between pick and render (unplugged drive,
+            # deleted meanwhile) — a raw crash in the async handler would be
+            # invisible to the user.
+            self.status_text.value = get_text("error_no_sample", self.language)
+            self.status_text.color = DANGER_COLOR
+            return
         cat = get_file_category(os.path.basename(self.sample_path))
         cat_icon, cat_color = CATEGORY_ICONS.get(cat, CATEGORY_ICONS["other"])
         mod_date = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")

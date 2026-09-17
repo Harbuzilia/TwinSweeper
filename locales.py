@@ -244,6 +244,9 @@ translations = {
 
         # Core-module progress & errors (round 2 i18n)
         "scan_error": "Error: {0}",
+        "scan_candidates_found": "Found {0} candidate groups ({1} files to analyze)...",
+        "scan_eta_suffix": " ({0} files/s, ETA {1}s)",
+        "no_match_filters": "No files match the current filters.",
         "scan_phase_indexing": "Phase 1/3: Indexing files...",
         "scan_indexed": "Indexed {0} files...",
         "scan_phase_analyzing": "Phase 2/3: Analyzing {0} candidate files...",
@@ -533,6 +536,9 @@ translations = {
 
         # Прогресс и ошибки модулей ядра (i18n раунда 2)
         "scan_error": "Ошибка: {0}",
+        "scan_candidates_found": "Найдено групп-кандидатов: {0} (файлов к анализу: {1})...",
+        "scan_eta_suffix": " ({0} файл/с, осталось {1} с)",
+        "no_match_filters": "Под текущие фильтры не подошёл ни один файл.",
         "scan_phase_indexing": "Фаза 1/3: индексация файлов...",
         "scan_indexed": "Проиндексировано файлов: {0}...",
         "scan_phase_analyzing": "Фаза 2/3: анализ кандидатов: {0}...",
