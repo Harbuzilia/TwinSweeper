@@ -66,11 +66,30 @@ class FileInfo:
         if self.category == "other":
             self.category = get_file_category(self.name)
 
+def long_path(path: str) -> str:
+    r"""Windows \\?\ long-path prefix, applied ONLY when the path exceeds the
+    legacy MAX_PATH (260) so normal paths stay byte-identical — zero regression
+    risk for the common case. Lets os.open/stat/read reach files deeper than
+    260 chars during SCANNING. Destructive operations deliberately keep the
+    plain display path: their C2 os.stat then fails on a >260 target and the
+    file is safely skipped rather than touched through an exotic path form."""
+    if os.name != "nt" or len(path) <= 255:
+        return path
+    try:
+        p = os.path.abspath(path)
+    except Exception:
+        return path
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):  # UNC \\server\share
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p
+
 def get_file_hash(filepath: str, block_size: int = 65536) -> Optional[str]:
     """Calculates full SHA256 hash. Returns None on read error."""
     hasher = hashlib.sha256()
     try:
-        with open(filepath, "rb") as f:
+        with open(long_path(filepath), "rb") as f:
             for block in iter(lambda: f.read(block_size), b""):
                 hasher.update(block)
         return hasher.hexdigest()
@@ -80,13 +99,14 @@ def get_file_hash(filepath: str, block_size: int = 65536) -> Optional[str]:
 def get_turbo_hash(filepath: str, partial_size: int = 65536) -> Optional[str]:
     """Fast hash on first + last 64KB of file. Returns None on read error."""
     try:
-        file_size = os.path.getsize(filepath)
+        lp = long_path(filepath)
+        file_size = os.path.getsize(lp)
         if HAS_XXHASH:
             hasher = xxhash.xxh64()
         else:
             hasher = hashlib.md5()
 
-        with open(filepath, "rb") as f:
+        with open(lp, "rb") as f:
             hasher.update(f.read(partial_size))
             if file_size > partial_size * 2:
                 f.seek(-partial_size, 2)
@@ -182,7 +202,7 @@ def is_system_path(path: str) -> bool:
 def compare_byte_by_byte(file1: str, file2: str, buffer_size: int = 65536) -> bool:
     """Compares two files byte by byte. Returns True if identical."""
     try:
-        with open(file1, 'rb') as f1, open(file2, 'rb') as f2:
+        with open(long_path(file1), 'rb') as f1, open(long_path(file2), 'rb') as f2:
             while True:
                 b1 = f1.read(buffer_size)
                 b2 = f2.read(buffer_size)

@@ -79,6 +79,28 @@ class TestHashing:
     def test_get_file_hash_missing_file_returns_none(self, tmp_path):
         assert get_file_hash(str(tmp_path / "missing.bin")) is None
 
+    def test_long_path_beyond_max_path_hashed(self, tmp_path):
+        r"""Round 3 D: a file deeper than the legacy 260-char MAX_PATH must
+        still be hashable — get_file_hash applies the \\?\ prefix internally.
+        Without it, open() on the plain long path fails and returns None."""
+        deep = tmp_path
+        for _ in range(20):
+            deep = deep / ("d" * 12)
+        long_file = deep / "file.bin"
+        assert len(str(long_file)) > 260
+        # Create it through the prefixed form so Windows permits the deep path.
+        try:
+            os.makedirs("\\\\?\\" + str(deep), exist_ok=True)
+            with open("\\\\?\\" + str(long_file), "wb") as fh:
+                fh.write(b"LONG PATH CONTENT" * 10)
+        except OSError:
+            pytest.skip("this system cannot create >260-char paths")
+
+        content = b"LONG PATH CONTENT" * 10
+        # The plain (unprefixed) long path must hash via the internal prefix.
+        assert get_file_hash(str(long_file)) == hashlib.sha256(content).hexdigest()
+        assert get_turbo_hash(str(long_file)) is not None
+
     def test_turbo_hash_stable_and_size_sensitive(self, tmp_path):
         a = tmp_path / "a.bin"
         b = tmp_path / "b.bin"

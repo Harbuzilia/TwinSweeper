@@ -4,7 +4,7 @@ from typing import List, Dict, Tuple, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 
-from scanner import FileInfo
+from scanner import FileInfo, long_path
 from db_cache import cache_db
 from locales import get_text
 
@@ -27,7 +27,7 @@ def compute_dhash(image_path: str, hash_size: int = 8) -> Optional[str]:
     Resistant to scaling, compression artifacts, and color changes.
     """
     try:
-        with Image.open(image_path) as img:
+        with Image.open(long_path(image_path)) as img:
             # EXIF orientation: phone photos are stored "sideways" plus an
             # orientation tag, while re-saved copies (messengers, editors) are
             # physically rotated. Without transposing to the canonical
