@@ -573,3 +573,21 @@ class TestCandidateScaleReport:
             use_cache=False, progress_callback=lambda m, p: messages.append(m),
         )
         assert any("candidate" in m.lower() for m in messages)
+
+
+class TestUnicodePaths:
+    """RU users have Cyrillic/spaced paths everywhere — the whole pipeline
+    (walk, stat, hash, group) must be agnostic to that."""
+
+    def test_cyrillic_and_spaced_names_grouped(self, tmp_path):
+        d1 = tmp_path / "папка №5"
+        d2 = tmp_path / "Отчёт копия (2)"
+        d1.mkdir()
+        d2.mkdir()
+        (d1 / "Данные файл.bin").write_bytes(b"U" * 100)
+        (d2 / "Данные файл.bin").write_bytes(b"U" * 100)
+
+        results = scan_directory([str(tmp_path)], by_size=True, by_hash=True, use_cache=False)
+
+        assert len(results) == 1
+        assert len(next(iter(results.values()))) == 2

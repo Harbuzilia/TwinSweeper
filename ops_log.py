@@ -89,6 +89,40 @@ def log_hardlink_operation(pairs: List[Tuple[str, str]], freed_bytes: int) -> di
     return append_operation("hardlink", paths, freed_bytes, {"pairs": [[o, d] for o, d in pairs]})
 
 
+def log_move_operation(moved_pairs: List[Tuple[str, str]], destination: str) -> dict:
+    """moved_pairs: [(source_path, destination_path)] — the reversible
+    alternative to deletion (round 2)."""
+    paths = [src for src, _ in moved_pairs]
+    return append_operation("move", paths, 0, {"destination": destination, "pairs": [[s, d] for s, d in moved_pairs]})
+
+
+def undo_move_operation(op_id: str) -> Tuple[int, List[str]]:
+    """Moves the files of a 'move' operation back to their original paths."""
+    with _lock:
+        ops = _load_unlocked()
+        op = next((o for o in ops if o.get("id") == op_id), None)
+        if not op or op.get("type") != "move" or op.get("undone"):
+            return 0, ["Operation not found or already undone"]
+
+        restored = 0
+        errors: List[str] = []
+        for source, dest in op.get("details", {}).get("pairs", []):
+            try:
+                if not os.path.exists(dest):
+                    continue
+                if os.path.exists(source):
+                    errors.append(f"Target already exists: {source}")
+                    continue
+                shutil.move(dest, source)
+                restored += 1
+            except Exception as ex:
+                errors.append(f"{dest}: {ex}")
+
+        op["undone"] = True
+        _save_unlocked(ops)
+        return restored, errors
+
+
 def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
     """Restores separate file copies for a hardlink operation. Returns (restored_count, errors)."""
     with _lock:

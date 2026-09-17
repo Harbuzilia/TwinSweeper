@@ -1,6 +1,7 @@
 import flet as ft
 import os
 import csv
+import html
 import json
 import datetime
 import functools
@@ -17,20 +18,24 @@ from ui.components import (
 )
 from locales import get_text
 from app_logging import get_logger
+from app_info import APP_VERSION
 from ui.thumbnails import get_cached_thumbnail
+from folder_priorities import is_priority_path, load_priority_folders, save_priority_folders
 
 logger = get_logger(__name__)
 
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
 
-    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True):
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True):
         super().__init__()
         self.all_results = dict(results)
         self.filtered_results = dict(results)
         self.on_back = on_back
         self.on_delete = on_delete
         self.on_hardlink = on_hardlink
+        # "Move to folder" — the reversible alternative to deletion.
+        self.on_move = on_move
         self.language = language
         self.allow_hardlink = allow_hardlink
         # Initial checkbox state for the delete dialog — comes from Settings
@@ -62,6 +67,8 @@ class ResultsView(ft.Column):
         # FilePicker for export
         self.export_picker = ft.FilePicker()
         self.pending_export_type = "csv"
+        # FilePicker for the "move to folder" destination.
+        self.move_picker = ft.FilePicker()
 
         # Calculate Overall Stats
         self.total_groups = len(results)
@@ -160,6 +167,10 @@ class ResultsView(ft.Column):
             bgcolor=SURFACE_HOVER,
             options=[
                 ft.dropdown.Option("first", get_text("select_all_except_first", self.language)),
+                ft.dropdown.Option("newest", get_text("keep_newest", self.language)),
+                ft.dropdown.Option("oldest", get_text("keep_oldest", self.language)),
+                ft.dropdown.Option("largest_res", get_text("keep_largest_res", self.language)),
+                ft.dropdown.Option("priority", get_text("select_except_priority", self.language)),
                 ft.dropdown.Option("last", get_text("select_all_except_last", self.language)),
                 ft.dropdown.Option("shortest", get_text("select_shortest_path", self.language)),
                 ft.dropdown.Option("all", get_text("select_all", self.language)),
@@ -168,6 +179,20 @@ class ResultsView(ft.Column):
             ],
             on_select=self.apply_smart_selection
         )
+
+        self.priority_folders_btn = get_action_icon_button(
+            icon=ft.Icons.FOLDER_SPECIAL_OUTLINED,
+            tooltip=get_text("folder_priorities", self.language),
+            on_click=self.show_priority_folders_dialog
+        )
+
+        self.move_btn = get_action_icon_button(
+            icon=ft.Icons.DRIVE_FILE_MOVE_ROUNDED,
+            tooltip=get_text("move_to_folder", self.language),
+            on_click=self.on_move_clicked
+        )
+        # No handler wired (headless tests) — hide instead of dead-clicking.
+        self.move_btn.visible = self.on_move is not None
 
         self.delete_btn = get_primary_button(
             text=f"{get_text('delete_selected', self.language)} (0)",
@@ -304,6 +329,7 @@ class ResultsView(ft.Column):
                             ft.PopupMenuItem(content=ft.Text(get_text("export_csv", self.language)), on_click=functools.partial(self.trigger_export, "csv")),
                             ft.PopupMenuItem(content=ft.Text(get_text("export_json", self.language)), on_click=functools.partial(self.trigger_export, "json")),
                             ft.PopupMenuItem(content=ft.Text(get_text("export_txt", self.language)), on_click=functools.partial(self.trigger_export, "txt")),
+                            ft.PopupMenuItem(content=ft.Text(get_text("export_html", self.language)), on_click=functools.partial(self.trigger_export, "html")),
                         ]
                     )
                 ], spacing=8)
@@ -318,6 +344,8 @@ class ResultsView(ft.Column):
                     ft.Row([
                         self.search_field,
                         self.smart_select_dropdown,
+                        self.priority_folders_btn,
+                        self.move_btn,
                         self.hardlink_btn,
                         self.delete_btn
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True, spacing=8),
@@ -705,6 +733,31 @@ class ResultsView(ft.Column):
                 if rule == "first":
                     for f in files[1:]:
                         self.selected_paths.add(f.path)
+                elif rule == "newest":
+                    # The classic photo workflow: keep the newest copy.
+                    keep = max(files, key=lambda x: x.modified)
+                    for f in files:
+                        if f.path != keep.path:
+                            self.selected_paths.add(f.path)
+                elif rule == "oldest":
+                    keep = min(files, key=lambda x: x.modified)
+                    for f in files:
+                        if f.path != keep.path:
+                            self.selected_paths.add(f.path)
+                elif rule == "largest_res":
+                    keep = self._pick_largest_resolution(files)
+                    for f in files:
+                        if f.path != keep.path:
+                            self.selected_paths.add(f.path)
+                elif rule == "priority":
+                    # Keep copies that live in the user's priority folders,
+                    # mark the rest. Groups with no priority member keep
+                    # their first file (never the whole group).
+                    priorities = load_priority_folders()
+                    keep_paths = {f.path for f in files if is_priority_path(f.path, priorities)} or {files[0].path}
+                    for f in files:
+                        if f.path not in keep_paths:
+                            self.selected_paths.add(f.path)
                 elif rule == "last":
                     for f in files[:-1]:
                         self.selected_paths.add(f.path)
@@ -733,8 +786,69 @@ class ResultsView(ft.Column):
         except Exception:
             pass
 
+    def _page_or_none(self):
+        """flet's Control.page raises RuntimeError (instead of returning None)
+        for controls not added to a page — keeps headless use safe."""
+        try:
+            return self.page
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _pick_largest_resolution(files: List[FileInfo]) -> FileInfo:
+        """The image with the most pixels — the natural 'keep' candidate for
+        photo series. PIL reads only the header for .size, so this stays fast
+        even for large photos. Unreadable/non-image entries never raise."""
+        best = files[0]
+        best_pixels = -1
+        for f in files:
+            try:
+                with Image.open(f.path) as img:
+                    pixels = img.size[0] * img.size[1]
+            except Exception:
+                continue
+            if pixels > best_pixels:
+                best_pixels = pixels
+                best = f
+        return best
+
+    def show_priority_folders_dialog(self, e):
+        page = self._page_or_none()
+        if page is None:
+            return
+
+        field = ft.TextField(
+            value="\n".join(load_priority_folders()),
+            label=get_text("folder_priorities", self.language),
+            hint_text=get_text("folder_priorities_hint", self.language),
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+            border_color=BORDER_COLOR,
+            bgcolor=SURFACE_HOVER,
+            text_size=12
+        )
+
+        def save_and_close(_):
+            folders = [line.strip() for line in (field.value or "").splitlines() if line.strip()]
+            save_priority_folders(folders)
+            page.pop_dialog()
+
+        dlg = get_styled_dialog(
+            title=get_text("folder_priorities", self.language),
+            icon=ft.Icons.FOLDER_SPECIAL_ROUNDED,
+            icon_color=PRIMARY_COLOR,
+            content=ft.Column([field], tight=True, spacing=8, width=480),
+            actions=[
+                get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: page.pop_dialog()),
+                get_primary_button(text=get_text("save", self.language), on_click=save_and_close, icon=ft.Icons.SAVE_OUTLINED)
+            ]
+        )
+        page.show_dialog(dlg)
+
     def show_side_by_side_comparison(self, files: List[FileInfo]):
-        if not self.page or len(files) < 2:
+        page = self._page_or_none()
+        if page is None or len(files) < 2:
             return
 
         file_a = files[0]
@@ -754,14 +868,14 @@ class ResultsView(ft.Column):
             self.selected_paths.discard(file_a.path)
             self.selected_paths.add(file_b.path)
             self.update_action_button_texts()
-            self.page.pop_dialog()
+            page.pop_dialog()
             self.refresh_filtered_results()
 
         def keep_b(e):
             self.selected_paths.discard(file_b.path)
             self.selected_paths.add(file_a.path)
             self.update_action_button_texts()
-            self.page.pop_dialog()
+            page.pop_dialog()
             self.refresh_filtered_results()
 
         card_a = ft.Container(
@@ -804,17 +918,18 @@ class ResultsView(ft.Column):
                 height=420
             ),
             actions=[
-                get_outlined_button(text=get_text("close", self.language), on_click=lambda _: self.page.pop_dialog())
+                get_outlined_button(text=get_text("close", self.language), on_click=lambda _: page.pop_dialog())
             ]
         )
-        self.page.show_dialog(dlg)
+        page.show_dialog(dlg)
 
     def show_image_lightbox(self, image_path: str):
-        if not self.page:
+        page = self._page_or_none()
+        if page is None:
             return
 
         def close_modal(e):
-            self.page.pop_dialog()
+            page.pop_dialog()
 
         dlg = get_styled_dialog(
             title=os.path.basename(image_path),
@@ -830,7 +945,7 @@ class ResultsView(ft.Column):
                 get_primary_button(text=get_text("open_file", self.language), on_click=lambda _: self.open_file_natively(image_path), icon=ft.Icons.OPEN_IN_NEW_ROUNDED)
             ]
         )
-        self.page.show_dialog(dlg)
+        page.show_dialog(dlg)
 
     def open_file_natively(self, path: str):
         try:
@@ -856,9 +971,12 @@ class ResultsView(ft.Column):
             f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
         )
         endangered = self.count_endangered_groups()
+        page = self._page_or_none()
+        if page is None:
+            return
 
         def confirm_delete(use_trash: bool):
-            self.page.pop_dialog()
+            page.pop_dialog()
             # C3: keep at least one copy in every fully-selected group.
             self._protect_originals()
             selected_entries = self.get_selected_entries()
@@ -877,7 +995,7 @@ class ResultsView(ft.Column):
             self.on_delete(selected_entries, use_trash=use_trash)
 
         def cancel_dialog(e):
-            self.page.pop_dialog()
+            page.pop_dialog()
 
         trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=self.trash_default)
 
@@ -924,7 +1042,7 @@ class ResultsView(ft.Column):
                 )
             ]
         )
-        self.page.show_dialog(dlg)
+        page.show_dialog(dlg)
 
     def on_hardlink_clicked(self, e):
         if not self.selected_paths or not self.on_hardlink:
@@ -936,9 +1054,12 @@ class ResultsView(ft.Column):
         total_size = sum(
             f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
         )
+        page = self._page_or_none()
+        if page is None:
+            return
 
         def confirm_hardlink(_):
-            self.page.pop_dialog()
+            page.pop_dialog()
             # Show progress bar
             self.operation_progress.visible = True
             self.operation_progress.value = 0
@@ -973,7 +1094,7 @@ class ResultsView(ft.Column):
             icon_color=PRIMARY_COLOR,
             content=ft.Text(get_text("hardlink_confirm_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),
             actions=[
-                get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: self.page.pop_dialog()),
+                get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: page.pop_dialog()),
                 get_primary_button(
                     text=get_text("hardlink_selected", self.language),
                     on_click=confirm_hardlink,
@@ -982,7 +1103,65 @@ class ResultsView(ft.Column):
                 )
             ]
         )
-        self.page.show_dialog(dlg)
+        page.show_dialog(dlg)
+
+    async def on_move_clicked(self, e):
+        """Pick a destination, confirm, then hand (path, size, mtime)
+        snapshots to the move worker — the reversible alternative to
+        deletion."""
+        if not self.selected_paths or not self.on_move:
+            return
+        if self._operation_busy:
+            return
+        page = self._page_or_none()
+        if page is None:
+            return
+
+        destination = await self.move_picker.get_directory_path(
+            dialog_title=get_text("choose_destination", self.language)
+        )
+        if not destination:
+            return
+
+        selected_list = list(self.selected_paths)
+        total_size = sum(
+            f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
+        )
+
+        def confirm_move(_):
+            page.pop_dialog()
+            selected_entries = self.get_selected_entries()
+            if not selected_entries:
+                return
+            self.operation_progress.visible = True
+            self.operation_progress.value = 0
+            self.operation_status.visible = True
+            self.operation_status.value = get_text("move_success_msg", self.language).format(0)
+            try:
+                self.update()
+            except Exception:
+                pass
+            self._operation_busy = True
+            self.on_move(selected_entries, destination)
+
+        dlg = get_styled_dialog(
+            title=get_text("move_confirm_title", self.language),
+            icon=ft.Icons.DRIVE_FILE_MOVE_ROUNDED,
+            icon_color=PRIMARY_COLOR,
+            content=ft.Text(
+                get_text("move_confirm_msg", self.language).format(len(selected_list), format_file_size(total_size), destination),
+                size=13, color=TEXT_SECONDARY
+            ),
+            actions=[
+                get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: page.pop_dialog()),
+                get_primary_button(
+                    text=get_text("move_selected", self.language),
+                    on_click=confirm_move,
+                    icon=ft.Icons.DRIVE_FILE_MOVE_ROUNDED
+                )
+            ]
+        )
+        page.show_dialog(dlg)
 
     def remove_files(self, removed_paths: List[str]):
         removed_set = set(removed_paths)
@@ -1062,5 +1241,42 @@ class ResultsView(ft.Column):
                         for file in files:
                             f.write(f"  - {file.path}\n")
                         f.write("\n")
+            elif export_type == "html":
+                # Standalone self-contained report: opens in any browser,
+                # printable — handy to review the plan before cleaning.
+                group_rows = []
+                for key, files in self.all_results.items():
+                    file_rows = "".join(
+                        "<tr>"
+                        f"<td>{html.escape(file.name)}</td>"
+                        f"<td>{html.escape(file.path)}</td>"
+                        f"<td class='num'>{file.size}</td>"
+                        f"<td class='num'>{html.escape(format_file_size(file.size))}</td>"
+                        "</tr>"
+                        for file in files
+                    )
+                    reclaimable = format_file_size(sum(x.size for x in files[1:]))
+                    group_rows.append(
+                        f"<tr class='group'><td colspan='4'>{html.escape(key)} — {len(files)} files, {html.escape(reclaimable)}</td></tr>"
+                        + file_rows
+                    )
+                document = (
+                    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                    "<title>Duplicater Report</title><style>"
+                    "body{font-family:'Segoe UI',Arial,sans-serif;margin:24px;background:#0f1218;color:#e6e9ef}"
+                    "h1{font-size:20px;margin-bottom:4px}p{color:#8b93a7;font-size:12px}"
+                    "table{border-collapse:collapse;width:100%;font-size:12px}"
+                    "th,td{border:1px solid #2a324b;padding:5px 9px;text-align:left;vertical-align:top}"
+                    "th{background:#1a2030}.num{text-align:right;white-space:nowrap}"
+                    ".group td{background:#1a2030;font-weight:600}"
+                    "</style></head><body>"
+                    "<h1>Duplicater Report</h1>"
+                    f"<p>{self.total_groups} groups · {html.escape(format_file_size(self.total_wasted_bytes))} reclaimable · v{APP_VERSION}</p>"
+                    "<table><tr><th>File</th><th>Path</th><th>Size (bytes)</th><th>Size</th></tr>"
+                    + "".join(group_rows) +
+                    "</table></body></html>"
+                )
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(document)
         except Exception as ex:
             logger.warning("Export error for '%s': %s", path, ex)

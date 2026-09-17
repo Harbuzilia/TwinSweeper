@@ -1,5 +1,6 @@
 import flet as ft
 import os
+import shutil
 import sys
 import json
 import threading
@@ -18,7 +19,7 @@ from scanner import (
 from phash_scanner import scan_similar_images
 from hardlink_manager import batch_replace_with_hardlinks
 from db_cache import cache_db
-from ops_log import load_operations, log_delete_operation, log_hardlink_operation, undo_hardlink_operation, get_data_dir
+from ops_log import load_operations, log_delete_operation, log_hardlink_operation, log_move_operation, undo_hardlink_operation, undo_move_operation, get_data_dir
 
 from ui.search_view import SearchView
 from ui.results_view import ResultsView
@@ -35,10 +36,9 @@ from ui.components import (
 )
 from locales import get_text, set_current_language
 from app_logging import setup_logging, get_logger
+from app_info import APP_NAME, APP_TAGLINE, APP_VERSION
 
 logger = get_logger(__name__)
-
-APP_VERSION = "3.6"
 
 try:
     from send2trash import send2trash
@@ -213,6 +213,155 @@ def build_hardlink_log_pairs(
         for entry in entries
         if entry[0] in succeeded
     ]
+
+def _unique_destination(destination: str, source_path: str) -> str:
+    """A collision-free name for *source_path* inside *destination* — existing
+    files are never overwritten by a move."""
+    name = os.path.basename(source_path)
+    candidate = os.path.join(destination, name)
+    stem, ext = os.path.splitext(name)
+    n = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(destination, f"{stem} ({n}){ext}")
+        n += 1
+    return candidate
+
+# --- Operation pipelines (module-level: testable without the GUI) -----------
+# Every worker in main(page) is a thin UI shell around one of these: verify →
+# act → journal, in 200-file chunks, cancellable between chunks.
+
+PIPELINE_CHUNK = 200
+
+def perform_delete(file_entries: List[Tuple[str, int, float]], use_trash: bool, cancel_flag: List[bool] = None, progress_callback=None) -> dict:
+    """The delete pipeline. file_entries: (path, size, mtime) scan snapshots.
+
+    Per file: C2 re-verification, then Recycle Bin (a trash failure NEVER
+    falls back to a permanent delete — H5) or os.remove. Journaled at the end
+    with only the actually deleted paths. progress_callback(processed, total)
+    fires once per 200-file chunk."""
+    total = len(file_entries)
+    state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": []}
+
+    for start in range(0, total, PIPELINE_CHUNK):
+        if cancel_flag and cancel_flag[0]:
+            return state
+        for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
+            # C2: only delete the file that was actually scanned.
+            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+            if not ok:
+                state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                continue
+            try:
+                if use_trash and HAS_SEND2TRASH:
+                    try:
+                        send2trash(path)
+                    except Exception as trash_ex:
+                        # H5: a failed move to the Recycle Bin must never
+                        # silently become an unrecoverable delete.
+                        state["errors"].append(get_text("trash_failed").format(path, trash_ex))
+                        continue
+                else:
+                    os.remove(path)
+                state["deleted_count"] += 1
+                state["total_freed"] += expected_size
+                state["actually_deleted"].append(path)
+            except Exception as ex:
+                state["errors"].append(get_text("error_delete").format(path, ex))
+
+        if progress_callback:
+            progress_callback(min(start + PIPELINE_CHUNK, total), total)
+
+    if state["actually_deleted"]:
+        log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+    return state
+
+def perform_hardlink(groups_map: Dict[str, List[Tuple[str, int, float]]], cancel_flag: List[bool] = None, progress_callback=None) -> dict:
+    """The hardlink pipeline. groups_map: {original: [(dupe, size, mtime)]}.
+
+    Per duplicate: C2 re-verification, then batch_replace_with_hardlinks
+    (which itself refuses non-identical content — C1). Only actually linked
+    files are journaled, so undo can never try to restore a file that was
+    never linked."""
+    total_dupes = sum(len(dups) for dups in groups_map.values())
+    state = {"success_count": 0, "freed_bytes": 0, "errors": [], "succeeded_paths": [], "total": total_dupes}
+    items = [(orig, dup) for orig, dups in groups_map.items() for dup in dups]
+    processed = 0
+
+    for start in range(0, len(items), PIPELINE_CHUNK):
+        if cancel_flag and cancel_flag[0]:
+            return state
+        chunk = items[start:start + PIPELINE_CHUNK]
+        chunk_map = {}
+        for orig, dup_entry in chunk:
+            path, expected_size, expected_mtime = dup_entry
+            # C2: only link the file that was actually scanned.
+            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+            if not ok:
+                state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                continue
+            chunk_map.setdefault(orig, []).append(path)
+        if chunk_map:
+            sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
+            state["success_count"] += sc
+            state["freed_bytes"] += fb
+            state["errors"].extend(errs)
+            state["succeeded_paths"].extend(sp)
+        processed += len(chunk)
+        if progress_callback:
+            progress_callback(processed, total_dupes)
+
+    if state["succeeded_paths"]:
+        pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
+        if pairs:
+            log_hardlink_operation(pairs, state["freed_bytes"])
+    return state
+
+def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, cancel_flag: List[bool] = None, progress_callback=None) -> dict:
+    """The move pipeline — the reversible alternative to deletion.
+
+    Per file: C2 re-verification, a collision-free destination name, copy to
+    a temp sibling + atomic os.replace, and only THEN the source is removed
+    (the M7 pattern: a crash leaves either the source or a complete copy,
+    never a truncated or half-missing file). Journaled for undo."""
+    total = len(file_entries)
+    state = {"moved_count": 0, "actually_moved": [], "errors": [], "destination": destination}
+    try:
+        os.makedirs(destination, exist_ok=True)
+    except OSError as ex:
+        state["errors"].append(get_text("error_move").format(destination, ex))
+        return state
+
+    for start in range(0, total, PIPELINE_CHUNK):
+        if cancel_flag and cancel_flag[0]:
+            return state
+        for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
+            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+            if not ok:
+                state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                continue
+            dest_path = _unique_destination(destination, path)
+            tmp_copy = dest_path + f".tmp_move_{os.getpid()}"
+            try:
+                shutil.copy2(path, tmp_copy)
+                os.replace(tmp_copy, dest_path)
+                # The source is only dropped once the copy is fully in place.
+                os.remove(path)
+                state["moved_count"] += 1
+                state["actually_moved"].append((path, dest_path))
+            except Exception as ex:
+                state["errors"].append(get_text("error_move").format(path, ex))
+                if os.path.exists(tmp_copy):
+                    try:
+                        os.remove(tmp_copy)
+                    except OSError:
+                        pass
+
+        if progress_callback:
+            progress_callback(min(start + PIPELINE_CHUNK, total), total)
+
+    if state["actually_moved"]:
+        log_move_operation(state["actually_moved"], destination)
+    return state
 
 def main(page: ft.Page):
     # File log lives next to scan_cache.db (DUPLICATER_DATA_DIR redirects it in tests).
@@ -479,6 +628,7 @@ def main(page: ft.Page):
             on_back=on_back,
             on_delete=delete_files_handler,
             on_hardlink=hardlink_files_handler,
+            on_move=move_files_handler,
             language=current_language,
             allow_hardlink=allow_hardlink,
             trash_default=trash_default[0]
@@ -488,62 +638,29 @@ def main(page: ft.Page):
         page.update()
 
     def delete_files_handler(file_entries: List[Tuple[str, int, float]], use_trash: bool = True):
-        """file_entries: (path, size, mtime) snapshots taken during the scan —
-        each file is re-verified before deletion (C2 TOCTOU guard)."""
+        """Thin UI shell over perform_delete (see the module-level pipeline)."""
         # Capture the view NOW: the worker must not act on a *different*
         # ResultsView if the user pressed Back and rescanned mid-delete.
         target_view = results_view_instance
-        total = len(file_entries)
-        state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": []}
 
         def _worker():
             try:
-                CHUNK = 200
-                for start in range(0, total, CHUNK):
-                    chunk = file_entries[start:start + CHUNK]
-                    for path, expected_size, expected_mtime in chunk:
-                        # C2: only delete the file that was actually scanned.
-                        ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-                        if not ok:
-                            state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
-                            continue
-                        try:
-                            if use_trash and HAS_SEND2TRASH:
-                                try:
-                                    send2trash(path)
-                                except Exception as trash_ex:
-                                    # H5: a failed move to the Recycle Bin must never
-                                    # silently become an unrecoverable delete.
-                                    state["errors"].append(get_text("trash_failed", current_language).format(path, trash_ex))
-                                    continue
-                            else:
-                                os.remove(path)
-                            state["deleted_count"] += 1
-                            state["total_freed"] += expected_size
-                            state["actually_deleted"].append(path)
-                        except Exception as ex:
-                            state["errors"].append(get_text("error_delete", current_language).format(path, ex))
-
-                    # Update progress
-                    done = min(start + CHUNK, total)
+                def report(done, tot):
                     if target_view is not None:
-                        target_view.operation_progress.value = done / total
-                        target_view.operation_status.value = get_text("deleting", current_language).format(state["deleted_count"], total)
+                        target_view.operation_progress.value = done / tot if tot else 1
+                        target_view.operation_status.value = get_text("deleting", current_language).format(done, tot)
                         try:
                             page.update()
                         except Exception:
                             pass
 
-                # Hide progress
+                state = perform_delete(file_entries, use_trash, progress_callback=report)
+
                 if target_view is not None:
                     target_view.operation_progress.visible = False
                     target_view.operation_status.visible = False
-
-                if target_view is not None and state["actually_deleted"]:
-                    target_view.remove_files(state["actually_deleted"])
-
-                if state["actually_deleted"]:
-                    log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+                    if state["actually_deleted"]:
+                        target_view.remove_files(state["actually_deleted"])
             finally:
                 # Whatever happened, the action buttons must become clickable again.
                 if target_view is not None:
@@ -571,59 +688,29 @@ def main(page: ft.Page):
         page.run_thread(_worker)
 
     def hardlink_files_handler(groups_map: Dict[str, List[Tuple[str, int, float]]]):
-        """groups_map: {original_path: [(dupe_path, size, mtime), ...]} — each
-        duplicate is re-verified before linking (C2 TOCTOU guard)."""
+        """Thin UI shell over perform_hardlink (see the module-level pipeline)."""
         # Capture the view now — same reasoning as delete_files_handler.
         target_view = results_view_instance
-        total_dupes = sum(len(dups) for dups in groups_map.values())
-        state = {"success_count": 0, "freed_bytes": 0, "errors": [], "succeeded_paths": []}
 
         def _worker():
             try:
-                CHUNK = 200
-                items = [(orig, dup) for orig, dups in groups_map.items() for dup in dups]
-                processed = 0
-                for start in range(0, len(items), CHUNK):
-                    chunk = items[start:start + CHUNK]
-                    chunk_map = {}
-                    for orig, dup_entry in chunk:
-                        path, expected_size, expected_mtime = dup_entry
-                        # C2: only link the file that was actually scanned.
-                        ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-                        if not ok:
-                            state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
-                            continue
-                        chunk_map.setdefault(orig, []).append(path)
-                    if chunk_map:
-                        sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
-                        state["success_count"] += sc
-                        state["freed_bytes"] += fb
-                        state["errors"].extend(errs)
-                        state["succeeded_paths"].extend(sp)
-                    processed += len(chunk)
-
-                    # Update progress
+                def report(done, tot):
                     if target_view is not None:
-                        target_view.operation_progress.value = processed / total_dupes if total_dupes else 1
-                        target_view.operation_status.value = get_text("hardlinking", current_language).format(state["success_count"], total_dupes)
+                        target_view.operation_progress.value = done / tot if tot else 1
+                        target_view.operation_status.value = get_text("hardlinking", current_language).format(done, tot)
                         try:
                             page.update()
                         except Exception:
                             pass
 
-                # Hide progress
+                state = perform_hardlink(groups_map, progress_callback=report)
+
                 if target_view is not None:
                     target_view.operation_progress.visible = False
                     target_view.operation_status.visible = False
-
-                # Remove only files that were actually replaced; failed ones stay selectable.
-                if target_view is not None and state["succeeded_paths"]:
-                    target_view.remove_files(state["succeeded_paths"])
-
-                if state["succeeded_paths"]:
-                    pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
-                    if pairs:
-                        log_hardlink_operation(pairs, state["freed_bytes"])
+                    # Remove only files that were actually replaced; failed ones stay selectable.
+                    if state["succeeded_paths"]:
+                        target_view.remove_files(state["succeeded_paths"])
             finally:
                 # Whatever happened, the action buttons must become clickable again.
                 if target_view is not None:
@@ -637,6 +724,55 @@ def main(page: ft.Page):
             dlg = get_styled_dialog(
                 title=get_text("hardlink_complete", current_language),
                 title_color=PRIMARY_COLOR,
+                content=ft.Text(msg, size=13, color=TEXT_SECONDARY),
+                actions=[
+                    get_primary_button(text=get_text("ok", current_language), on_click=lambda _: page.pop_dialog(), height=36)
+                ]
+            )
+            page.show_dialog(dlg)
+            try:
+                page.update()
+            except Exception:
+                pass
+
+        page.run_thread(_worker)
+
+    def move_files_handler(file_entries: List[Tuple[str, int, float]], destination: str):
+        """Thin UI shell over perform_move — the reversible alternative to
+        deletion (round 2 / stage 4c)."""
+        target_view = results_view_instance
+
+        def _worker():
+            try:
+                def report(done, tot):
+                    if target_view is not None:
+                        target_view.operation_progress.value = done / tot if tot else 1
+                        target_view.operation_status.value = get_text("move_success_msg", current_language).format(done)
+                        try:
+                            page.update()
+                        except Exception:
+                            pass
+
+                state = perform_move(file_entries, destination, progress_callback=report)
+
+                if target_view is not None:
+                    target_view.operation_progress.visible = False
+                    target_view.operation_status.visible = False
+                    # Sources that actually moved leave the results list.
+                    if state["actually_moved"]:
+                        target_view.remove_files([src for src, _ in state["actually_moved"]])
+            finally:
+                if target_view is not None:
+                    target_view._operation_busy = False
+
+            msg = get_text("move_success_msg", current_language).format(state["moved_count"])
+            msg += "\n" + get_text("moved_to", current_language).format(destination)
+            if state["errors"]:
+                msg += "\n\n" + get_text("dlg_errors_list") + ":\n" + "\n".join(state["errors"][:5])
+
+            dlg = get_styled_dialog(
+                title=get_text("move_complete", current_language),
+                title_color=SUCCESS_COLOR,
                 content=ft.Text(msg, size=13, color=TEXT_SECONDARY),
                 actions=[
                     get_primary_button(text=get_text("ok", current_language), on_click=lambda _: page.pop_dialog(), height=36)
@@ -727,10 +863,13 @@ def main(page: ft.Page):
         operations = load_operations()
         ops_items = []
 
-        def undo_hardlink_action(op_id: str):
+        def undo_operation_action(op: dict):
+            undo_fn = undo_move_operation if op.get("type") == "move" else undo_hardlink_operation
+            op_id = op.get("id")
+
             def _worker():
-                # M7b: undo copies whole files — must not run on the UI thread.
-                restored, undo_errors = undo_hardlink_operation(op_id)
+                # M7b: undo copies/moves whole files — must not run on the UI thread.
+                restored, undo_errors = undo_fn(op_id)
                 undo_msg = get_text("op_undo_done", current_language).format(restored)
                 if undo_errors:
                     undo_msg += "\n" + "\n".join(undo_errors[:3])
@@ -746,9 +885,13 @@ def main(page: ft.Page):
             page.run_thread(_worker)
 
         for op in operations[:10]:
-            op_icon = ft.Icons.LINK_ROUNDED if op.get("type") == "hardlink" else ft.Icons.DELETE_OUTLINE_ROUNDED
-            op_color = PRIMARY_COLOR if op.get("type") == "hardlink" else DANGER_COLOR
-            op_title_key = "op_hardlink" if op.get("type") == "hardlink" else "op_delete"
+            op_type = op.get("type")
+            if op_type == "hardlink":
+                op_icon, op_color, op_title_key = ft.Icons.LINK_ROUNDED, PRIMARY_COLOR, "op_hardlink"
+            elif op_type == "move":
+                op_icon, op_color, op_title_key = ft.Icons.DRIVE_FILE_MOVE_OUTLINED, ACCENT_COLOR, "op_move"
+            else:
+                op_icon, op_color, op_title_key = ft.Icons.DELETE_OUTLINE_ROUNDED, DANGER_COLOR, "op_delete"
             op_time = datetime.fromtimestamp(op.get("ts", 0)).strftime("%Y-%m-%d %H:%M")
             op_row_controls = [
                 ft.Container(
@@ -762,8 +905,8 @@ def main(page: ft.Page):
                     ft.Text(f"{op_time}  •  -{format_file_size(op.get('freed_bytes', 0))}", size=11, color=TEXT_MUTED),
                 ], expand=True, spacing=2),
             ]
-            if op.get("type") == "hardlink" and not op.get("undone"):
-                op_row_controls.append(get_action_icon_button(icon=ft.Icons.UNDO_ROUNDED, icon_color=WARNING_COLOR, tooltip=get_text("op_undo", current_language), on_click=lambda _, oid=op.get("id"): undo_hardlink_action(oid), button_size=34, icon_size=18))
+            if op_type in ("hardlink", "move") and not op.get("undone"):
+                op_row_controls.append(get_action_icon_button(icon=ft.Icons.UNDO_ROUNDED, icon_color=WARNING_COLOR, tooltip=get_text("op_undo", current_language), on_click=lambda _, o=op: undo_operation_action(o), button_size=34, icon_size=18))
             elif op.get("undone"):
                 op_row_controls.append(get_badge(get_text("op_undone", current_language), color=TEXT_MUTED))
             ops_items.append(ft.Container(
@@ -1055,8 +1198,8 @@ def main(page: ft.Page):
                             )
                         ),
                         ft.Column([
-                            ft.Text("DUPLICATER", size=15, weight=ft.FontWeight.BOLD, color=theme["TEXT_PRIMARY"]),
-                            ft.Text(f"Pro Disk Optimizer v{APP_VERSION}", size=11, color=theme["TEXT_MUTED"]),
+                            ft.Text(APP_NAME, size=15, weight=ft.FontWeight.BOLD, color=theme["TEXT_PRIMARY"]),
+                            ft.Text(f"{APP_TAGLINE} v{APP_VERSION}", size=11, color=theme["TEXT_MUTED"]),
                         ], spacing=1)
                     ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=ft.Padding.only(bottom=10, top=4, left=4, right=4)

@@ -202,3 +202,94 @@ class TestOperationBusyGuard:
         view._operation_busy = True
         view.on_hardlink_clicked(None)
         assert calls == []
+
+
+class TestSmartSelectRules:
+    """Round 2 / Stage 4: 'keep newest / oldest / highest resolution /
+    priority-folder copy' selection rules."""
+
+    @staticmethod
+    def _apply(view, rule):
+        view.smart_select_dropdown.value = rule
+        view.apply_smart_selection(None)
+
+    def test_keep_newest(self, tmp_path):
+        old = make_info(str(tmp_path / "old.bin"), 10, modified=1000.0)
+        new = make_info(str(tmp_path / "new.bin"), 10, modified=2000.0)
+        view = make_view({"k": [old, new]})
+        view.selected_paths.clear()
+        self._apply(view, "newest")
+        assert view.selected_paths == {old.path}
+
+    def test_keep_oldest(self, tmp_path):
+        old = make_info(str(tmp_path / "old.bin"), 10, modified=1000.0)
+        new = make_info(str(tmp_path / "new.bin"), 10, modified=2000.0)
+        view = make_view({"k": [old, new]})
+        view.selected_paths.clear()
+        self._apply(view, "oldest")
+        assert view.selected_paths == {new.path}
+
+    def test_keep_largest_resolution(self, tmp_path):
+        from PIL import Image
+
+        Image.new("RGB", (60, 40)).save(str(tmp_path / "small.png"))
+        Image.new("RGB", (800, 600)).save(str(tmp_path / "big.png"))
+        small = make_info(str(tmp_path / "small.png"), 10)
+        big = make_info(str(tmp_path / "big.png"), 10)
+        view = make_view({"k": [small, big]})
+        view.selected_paths.clear()
+        self._apply(view, "largest_res")
+        assert view.selected_paths == {small.path}
+
+    def test_priority_rule_keeps_priority_folder_copies(self, tmp_path, monkeypatch):
+        keep_dir = tmp_path / "keepme"
+        keep_dir.mkdir()
+        others_dir = tmp_path / "cleanup"
+        others_dir.mkdir()
+        keeper = make_info(str(keep_dir / "a.bin"), 10)
+        dup1 = make_info(str(others_dir / "a.bin"), 10)
+        dup2 = make_info(str(others_dir / "a (2).bin"), 10)
+        view = make_view({"k": [keeper, dup1, dup2]})
+        view.selected_paths.clear()
+
+        import ui.results_view as results_view_module
+        monkeypatch.setattr(results_view_module, "load_priority_folders", lambda: [str(keep_dir)])
+
+        self._apply(view, "priority")
+        assert view.selected_paths == {dup1.path, dup2.path}
+
+    def test_priority_rule_without_match_keeps_first(self, tmp_path, monkeypatch):
+        d1 = tmp_path / "d1"
+        d2 = tmp_path / "d2"
+        d1.mkdir()
+        d2.mkdir()
+        f0 = make_info(str(d1 / "a.bin"), 10)
+        f1 = make_info(str(d2 / "a.bin"), 10)
+        view = make_view({"k": [f0, f1]})
+        view.selected_paths.clear()
+
+        import ui.results_view as results_view_module
+        monkeypatch.setattr(results_view_module, "load_priority_folders", lambda: [])
+
+        self._apply(view, "priority")
+        assert view.selected_paths == {f1.path}
+
+
+class TestHtmlExport:
+    def test_html_report_written(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 100),
+             make_info(str(tmp_path / "a1.bin"), 100)]
+        view = make_view({"k": g})
+        target = tmp_path / "report.html"
+
+        view.write_export_file(str(target), "html")
+
+        content = target.read_text(encoding="utf-8")
+        assert content.startswith("<!DOCTYPE html>")
+        assert "a0.bin" in content
+        assert "a1.bin" in content
+
+    def test_export_failure_never_raises(self, tmp_path):
+        view = make_view({"k": [make_info(str(tmp_path / "a.bin"), 10)]})
+        # A directory as the target file: open() fails — must be swallowed.
+        view.write_export_file(str(tmp_path), "txt")
