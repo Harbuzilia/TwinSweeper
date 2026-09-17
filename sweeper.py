@@ -163,7 +163,9 @@ def find_broken_shortcuts(
                                 "path": filepath,
                                 "name": filename,
                                 "target": target,
-                                "size": stat.st_size
+                                "size": stat.st_size,
+                                # Snapshot for the C2 re-check before deletion.
+                                "modified": stat.st_mtime
                             })
                         except OSError:
                             continue

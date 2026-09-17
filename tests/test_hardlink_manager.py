@@ -165,3 +165,44 @@ class TestBatchReplaceWithHardlinks:
         assert os.path.samefile(str(original), str(good))
         with open(bad, "rb") as f:
             assert f.read() == b"WRONG" * 100
+
+
+class TestAlreadyLinkedNotJournaled:
+    """Round 3 B13: a pre-existing hardlink pair has nothing to free. Adding it
+    to succeeded_paths would journal it, and a later 'undo' would unlink files
+    the user linked himself long ago."""
+
+    def test_pre_existing_hardlink_skipped(self, tmp_path):
+        original = tmp_path / "orig.bin"
+        original.write_bytes(b"X" * 50)
+        alias = tmp_path / "alias.bin"
+        os.link(str(original), str(alias))  # already the same physical file
+
+        success, freed, errors, succeeded = batch_replace_with_hardlinks(
+            {str(original): [str(alias)]}
+        )
+
+        assert succeeded == []  # nothing journaled
+        assert success == 0
+        assert os.path.samefile(str(original), str(alias))  # still linked, untouched
+
+
+class TestOrphanedBackupRecovery:
+    """Round 3 B13: a crash between the two renames leaves the duplicate at a
+    .tmp_hl_backup_<oldpid> path with nothing at the target. A later run must
+    restore it instead of reporting 'duplicate not found' and leaving the file
+    invisible at its real path."""
+
+    def test_orphaned_backup_restored_when_target_missing(self, tmp_path):
+        original = tmp_path / "orig.bin"
+        original.write_bytes(b"DATA" * 20)
+        target = tmp_path / "dup.bin"  # does NOT exist (crash removed it)
+        orphan = tmp_path / "dup.bin.tmp_hl_backup_99999"  # crashed previous run
+        orphan.write_bytes(b"DATA" * 20)
+
+        ok, err, freed = replace_with_hardlink(str(original), str(target))
+
+        assert ok is True
+        assert target.exists()  # restored, then linked
+        assert not orphan.exists()  # consumed by the restore
+        assert os.path.samefile(str(original), str(target))

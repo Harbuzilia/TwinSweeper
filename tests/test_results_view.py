@@ -300,6 +300,40 @@ class TestSmartSelectRules:
         assert view.selected_paths == {f1.path}
 
 
+class TestMoveProtectsOriginal:
+    """Round 3 B10: 'Move to folder' must also guarantee ≥1 copy stays — a
+    fully selected group must not be moved out entirely (the delete path had
+    this C3 guard; move did not)."""
+
+    def test_move_keeps_one_copy_when_all_selected(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        moves = []
+        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append((entries, dest)))
+        view.selected_paths = {g[0].path, g[1].path}  # user selected ALL
+
+        view._do_move(str(tmp_path / "dest"))
+
+        assert len(moves) == 1
+        entries, dest = moves[0]
+        moved_paths = {e[0] for e in entries}
+        # The original (a0, oldest) is protected — only a1 is moved.
+        assert moved_paths == {g[1].path}
+        assert dest == str(tmp_path / "dest")
+
+    def test_partial_selection_moves_as_is(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10),
+             make_info(str(tmp_path / "a2.bin"), 10)]
+        moves = []
+        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append(entries))
+        view.selected_paths = {g[2].path}  # only one, original safe
+
+        view._do_move(str(tmp_path / "dest"))
+
+        assert {e[0] for e in moves[0]} == {g[2].path}
+
+
 class TestExportFormats:
     """All four export formats, checked by real output structure — not just
     'some substring is present'."""

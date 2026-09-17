@@ -153,3 +153,27 @@ class TestSettingsStore:
         monkeypatch.setattr("os.replace", crash_replace)
         main.save_settings({"language": "ru"})  # swallowed + logged
         assert main.load_settings()["language"] == "en"
+
+
+class TestHistoryValidation:
+    """Round 3 B14: a corrupt/foreign scan_history.json must not crash the scan
+    worker later with AttributeError on .append (the old load returned whatever
+    json.load produced, e.g. a dict)."""
+
+    def test_corrupt_history_dict_returns_empty(self, monkeypatch, tmp_path):
+        p = tmp_path / "history.json"
+        p.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(main, "HISTORY_FILE", str(p))
+        assert main.load_history() == []
+
+    def test_corrupt_history_garbage_returns_empty(self, monkeypatch, tmp_path):
+        p = tmp_path / "history.json"
+        p.write_text("not json at all", encoding="utf-8")
+        monkeypatch.setattr(main, "HISTORY_FILE", str(p))
+        assert main.load_history() == []
+
+    def test_valid_history_list_returned(self, monkeypatch, tmp_path):
+        p = tmp_path / "history.json"
+        p.write_text('[{"date": "x", "folders": [], "duplicates": 0, "wasted": 0}]', encoding="utf-8")
+        monkeypatch.setattr(main, "HISTORY_FILE", str(p))
+        assert len(main.load_history()) == 1

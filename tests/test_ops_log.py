@@ -185,3 +185,39 @@ class TestOpsLogConcurrencyAndAtomicity:
         ops = isolated_ops_log.load_operations()
         assert len(ops) == 1
         assert ops[0]["id"] == first["id"]
+
+
+class TestUndoRetryableOnPartialFailure:
+    """Round 3 B12: an undo that cannot fully restore must NOT be marked
+    'undone' — otherwise the retry button disappears forever and the files
+    stay unrestored with no way to try again."""
+
+    def test_undo_with_error_stays_retryable(self, tmp_path, isolated_ops_log):
+        original = tmp_path / "orig.bin"
+        duplicate = tmp_path / "dup.bin"
+        original.write_bytes(b"X" * 50)
+        os.link(str(original), str(duplicate))  # real hardlink pair
+        op = isolated_ops_log.log_hardlink_operation([(str(original), str(duplicate))], 50)
+
+        # Make restoration impossible: the original is gone.
+        os.remove(str(original))
+        restored, errors = isolated_ops_log.undo_hardlink_operation(op["id"])
+
+        assert restored == 0
+        assert errors  # "Original missing"
+        # Crucial: NOT marked undone, so the user can retry.
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+    def test_undo_full_success_marks_undone(self, tmp_path, isolated_ops_log):
+        original = tmp_path / "orig.bin"
+        duplicate = tmp_path / "dup.bin"
+        original.write_bytes(b"X" * 50)
+        os.link(str(original), str(duplicate))
+        op = isolated_ops_log.log_hardlink_operation([(str(original), str(duplicate))], 50)
+
+        restored, errors = isolated_ops_log.undo_hardlink_operation(op["id"])
+
+        assert restored == 1 and not errors
+        assert isolated_ops_log.load_operations()[0]["undone"] is True
+        # The duplicate is an independent copy again.
+        assert not os.path.samefile(str(original), str(duplicate))

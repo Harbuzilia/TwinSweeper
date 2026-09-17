@@ -103,24 +103,33 @@ def undo_move_operation(op_id: str) -> Tuple[int, List[str]]:
         op = next((o for o in ops if o.get("id") == op_id), None)
         if not op or op.get("type") != "move" or op.get("undone"):
             return 0, ["Operation not found or already undone"]
+        pairs = [tuple(p) for p in op.get("details", {}).get("pairs", [])]
 
-        restored = 0
-        errors: List[str] = []
-        for source, dest in op.get("details", {}).get("pairs", []):
-            try:
-                if not os.path.exists(dest):
-                    continue
-                if os.path.exists(source):
-                    errors.append(f"Target already exists: {source}")
-                    continue
-                shutil.move(dest, source)
-                restored += 1
-            except Exception as ex:
-                errors.append(f"{dest}: {ex}")
+    # File moves run OUTSIDE the lock: they can take a long time and must not
+    # block journaling from other workers or freeze the History tab (round 3).
+    restored = 0
+    errors: List[str] = []
+    for source, dest in pairs:
+        try:
+            if not os.path.exists(dest):
+                continue
+            if os.path.exists(source):
+                errors.append(f"Target already exists: {source}")
+                continue
+            shutil.move(dest, source)
+            restored += 1
+        except Exception as ex:
+            errors.append(f"{dest}: {ex}")
 
-        op["undone"] = True
-        _save_unlocked(ops)
-        return restored, errors
+    # Mark undone ONLY on full success — otherwise the retry button must stay
+    # available (a partial undo used to be marked done and become unretryable).
+    with _lock:
+        ops = _load_unlocked()
+        fresh = next((o for o in ops if o.get("id") == op_id), None)
+        if fresh is not None and not errors:
+            fresh["undone"] = True
+            _save_unlocked(ops)
+    return restored, errors
 
 
 def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
@@ -130,38 +139,45 @@ def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
         op = next((o for o in ops if o.get("id") == op_id), None)
         if not op or op.get("type") != "hardlink" or op.get("undone"):
             return 0, ["Operation not found or already undone"]
+        pairs = [tuple(p) for p in op.get("details", {}).get("pairs", [])]
 
-        restored = 0
-        errors: List[str] = []
-        for original, duplicate in op.get("details", {}).get("pairs", []):
-            try:
-                if not os.path.exists(original):
-                    errors.append(f"Original missing: {original}")
-                    continue
-                if os.path.exists(duplicate):
-                    if os.path.samefile(original, duplicate):
-                        # Copy the original to a temp sibling first and swap it in
-                        # atomically: a failed copy must never leave the duplicate
-                        # destroyed (M7 — the old code removed it before copying).
-                        tmp_copy = duplicate + f".tmp_undo_{os.getpid()}"
-                        try:
-                            shutil.copy2(original, tmp_copy)
-                            os.replace(tmp_copy, duplicate)
-                        finally:
-                            if os.path.exists(tmp_copy):
-                                try:
-                                    os.remove(tmp_copy)
-                                except OSError:
-                                    pass
-                    else:
-                        # Path was recreated by the user afterwards - leave it untouched.
-                        continue
+    # File copies run OUTSIDE the lock (see undo_move_operation).
+    restored = 0
+    errors: List[str] = []
+    for original, duplicate in pairs:
+        try:
+            if not os.path.exists(original):
+                errors.append(f"Original missing: {original}")
+                continue
+            if os.path.exists(duplicate):
+                if os.path.samefile(original, duplicate):
+                    # Copy the original to a temp sibling first and swap it in
+                    # atomically: a failed copy must never leave the duplicate
+                    # destroyed (M7 — the old code removed it before copying).
+                    tmp_copy = duplicate + f".tmp_undo_{os.getpid()}"
+                    try:
+                        shutil.copy2(original, tmp_copy)
+                        os.replace(tmp_copy, duplicate)
+                    finally:
+                        if os.path.exists(tmp_copy):
+                            try:
+                                os.remove(tmp_copy)
+                            except OSError:
+                                pass
                 else:
-                    shutil.copy2(original, duplicate)
-                restored += 1
-            except Exception as ex:
-                errors.append(f"{duplicate}: {ex}")
+                    # Path was recreated by the user afterwards - leave it untouched.
+                    continue
+            else:
+                shutil.copy2(original, duplicate)
+            restored += 1
+        except Exception as ex:
+            errors.append(f"{duplicate}: {ex}")
 
-        op["undone"] = True
-        _save_unlocked(ops)
-        return restored, errors
+    # Mark undone ONLY on full success (round 3).
+    with _lock:
+        ops = _load_unlocked()
+        fresh = next((o for o in ops if o.get("id") == op_id), None)
+        if fresh is not None and not errors:
+            fresh["undone"] = True
+            _save_unlocked(ops)
+    return restored, errors

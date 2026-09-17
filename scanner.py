@@ -4,7 +4,7 @@ import fnmatch
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_cache import cache_db
@@ -96,6 +96,21 @@ def get_turbo_hash(filepath: str, partial_size: int = 65536) -> Optional[str]:
         return hasher.hexdigest()
     except (OSError, PermissionError):
         return None
+
+def verify_file_unchanged(path: str, expected_size: int, expected_mtime: float) -> Tuple[bool, str]:
+    """C2 TOCTOU guard: confirms the file still matches its scan-time snapshot
+    (size and mtime) before a destructive operation. Lives in scanner (the
+    lowest-level module) so both main.py and the sweeper can share it without
+    a circular import. Returns (True, "") or (False, human-readable reason)."""
+    try:
+        stat = os.stat(path)
+    except OSError as ex:
+        return False, get_text("verify_failed_access").format(ex)
+    if stat.st_size != expected_size:
+        return False, get_text("verify_failed_size").format(expected_size, stat.st_size)
+    if abs(stat.st_mtime - expected_mtime) > 0.001:
+        return False, get_text("verify_failed_mtime")
+    return True, ""
 
 # Known system locations matched as whole path components, never as substrings
 # (M2: substring matching flagged paths like E:\bootcamp\notes.txt).

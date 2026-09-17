@@ -1153,19 +1153,7 @@ class ResultsView(ft.Column):
 
         def confirm_move(_):
             page.pop_dialog()
-            selected_entries = self.get_selected_entries()
-            if not selected_entries:
-                return
-            self.operation_progress.visible = True
-            self.operation_progress.value = 0
-            self.operation_status.visible = True
-            self.operation_status.value = get_text("move_success_msg", self.language).format(0)
-            try:
-                self.update()
-            except Exception:
-                pass
-            self._operation_busy = True
-            self.on_move(selected_entries, destination)
+            self._do_move(destination)
 
         dlg = get_styled_dialog(
             title=get_text("move_confirm_title", self.language),
@@ -1185,6 +1173,26 @@ class ResultsView(ft.Column):
             ]
         )
         page.show_dialog(dlg)
+
+    def _do_move(self, destination: str):
+        """Confirm-handler core for "Move to folder" — extracted so the C3
+        protection is testable headless. Never moves a group out entirely:
+        at least one copy stays in its original location."""
+        # C3 for moves too: a fully-selected group keeps its original.
+        self._protect_originals()
+        selected_entries = self.get_selected_entries()
+        if not selected_entries:
+            return
+        self.operation_progress.visible = True
+        self.operation_progress.value = 0
+        self.operation_status.visible = True
+        self.operation_status.value = get_text("move_success_msg", self.language).format(0)
+        try:
+            self.update()
+        except Exception:
+            pass
+        self._operation_busy = True
+        self.on_move(selected_entries, destination)
 
     def remove_files(self, removed_paths: List[str]):
         removed_set = set(removed_paths)

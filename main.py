@@ -14,7 +14,8 @@ except ImportError:
     HAS_WINREG = False
 
 from scanner import (
-    scan_directory, scan_for_sample, compare_folders, FileInfo, format_file_size, compute_wasted_bytes
+    scan_directory, scan_for_sample, compare_folders, FileInfo, format_file_size, compute_wasted_bytes,
+    verify_file_unchanged
 )
 from phash_scanner import scan_similar_images
 from hardlink_manager import batch_replace_with_hardlinks, is_same_volume
@@ -91,26 +92,16 @@ def save_settings(updates: dict) -> None:
 # comparison fails (H2: a mismatched shape used to crash the results UI).
 EMPTY_COMPARE_RESULT = {"unique_a": [], "unique_b": [], "common": [], "total_files": 0}
 
-def verify_file_unchanged(path: str, expected_size: int, expected_mtime: float) -> Tuple[bool, str]:
-    """C2 TOCTOU guard: confirms the file still matches its scan-time snapshot
-    (size and mtime) before a destructive operation.
-    Returns (True, "") or (False, human-readable reason)."""
-    try:
-        stat = os.stat(path)
-    except OSError as ex:
-        return False, get_text("verify_failed_access").format(ex)
-    if stat.st_size != expected_size:
-        return False, get_text("verify_failed_size").format(expected_size, stat.st_size)
-    if abs(stat.st_mtime - expected_mtime) > 0.001:
-        return False, get_text("verify_failed_mtime")
-    return True, ""
-
 def load_history() -> List[dict]:
     with _history_lock:
         try:
             if os.path.exists(HISTORY_FILE):
                 with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    # A corrupt/foreign file (e.g. {}) must not crash the scan
+                    # worker later with AttributeError on .append (round 3).
+                    if isinstance(data, list):
+                        return data
         except Exception as ex:
             logger.warning("scan history unreadable: %s", ex)
         return []

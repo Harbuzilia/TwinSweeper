@@ -4,7 +4,7 @@ import threading
 from typing import List, Dict, Set
 
 from sweeper import find_empty_directories, delete_empty_directories, find_broken_shortcuts, find_junk_files
-from scanner import FileInfo, format_file_size
+from scanner import FileInfo, format_file_size, verify_file_unchanged
 from ui.components import (
     get_styled_card, get_styled_dialog, get_primary_button, get_outlined_button, get_header_row, get_badge,
     get_segmented_control, get_drive_chip, get_folder_list_item, get_progress_card,
@@ -40,6 +40,9 @@ class SweeperView(ft.Column):
         self.junk_files_list: List[FileInfo] = []
 
         self.selected_items: Set[str] = set()
+        # C2 snapshots {path: (size, mtime)} captured at scan time — the clean
+        # worker re-verifies each file before deleting it (round 3).
+        self._scan_snapshots: Dict[str, tuple] = {}
         self.cancel_flag = [False]
         self.loaded_count = 0
         # True while a sweep scan or a clean worker is running — blocks
@@ -259,14 +262,17 @@ class SweeperView(ft.Column):
                     res = find_empty_directories(self.selected_directories, cancel_flag=self.cancel_flag)
                     self.empty_folders_list = res
                     self.selected_items = set(res)
+                    self._scan_snapshots = {}  # rmdir is inherently safe (empty only)
                 elif self.active_mode == "broken_shortcuts":
                     res = find_broken_shortcuts(self.selected_directories, cancel_flag=self.cancel_flag)
                     self.broken_shortcuts_list = res
                     self.selected_items = set(r["path"] for r in res)
+                    self._scan_snapshots = {r["path"]: (r["size"], r.get("modified", 0.0)) for r in res}
                 else:
                     res = find_junk_files(self.selected_directories, cancel_flag=self.cancel_flag)
                     self.junk_files_list = res
                     self.selected_items = set(r.path for r in res)
+                    self._scan_snapshots = {r.path: (r.size, r.modified) for r in res}
             finally:
                 self._scan_busy = False
                 self.render_sweep_results()
@@ -536,6 +542,15 @@ class SweeperView(ft.Column):
                     for start in range(0, len(items), CHUNK):
                         chunk = items[start:start + CHUNK]
                         for path in chunk:
+                            # C2: only delete the file that was actually scanned —
+                            # a junk path reused by a real file since the scan
+                            # (e.g. an app started writing a fresh .log) is skipped.
+                            snap = self._scan_snapshots.get(path)
+                            if snap:
+                                ok, reason = verify_file_unchanged(path, snap[0], snap[1])
+                                if not ok:
+                                    state["errors"].append(get_text("error_verify_failed", self.language).format(path, reason))
+                                    continue
                             try:
                                 stat = os.stat(path)
                             except FileNotFoundError:
@@ -544,7 +559,12 @@ class SweeperView(ft.Column):
                                 state["errors"].append(f"{os.path.basename(path)}: {ex}")
                                 continue
                             try:
-                                if use_trash and HAS_SEND2TRASH:
+                                if use_trash:
+                                    if not HAS_SEND2TRASH:
+                                        # Never silently delete forever when the
+                                        # user asked for the Recycle Bin (H5/A4).
+                                        state["errors"].append(get_text("trash_unavailable", self.language).format(path))
+                                        continue
                                     try:
                                         send2trash(path)
                                     except Exception as trash_ex:

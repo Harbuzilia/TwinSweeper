@@ -219,3 +219,48 @@ class TestSweepWorkerExecution:
         assert len(view.junk_files_list) == 2
         assert view.scan_button.visible is True
         assert view.cancel_button.visible is False
+
+
+class TestSweeperC2Verification:
+    """Round 3 B9: the sweeper must re-verify each file against its scan-time
+    snapshot before deleting. A junk path reused by a real, changed file since
+    the scan (e.g. an app started writing a fresh .log) must be skipped."""
+
+    def test_changed_junk_file_not_deleted(self, tmp_path, monkeypatch):
+        view = SweeperView(language="ru")
+        junk = tmp_path / "app.log"
+        junk.write_bytes(b"old junk")
+        st = junk.stat()
+        view.active_mode = "junk_files"
+        view.junk_files_list = [FileInfo(str(junk), junk.name, st.st_size, st.st_ctime, st.st_mtime)]
+        view.selected_items = {str(junk)}
+        view._scan_snapshots = {str(junk): (st.st_size, st.st_mtime)}
+
+        # The path is reused by a real, changed file after the scan.
+        junk.write_bytes(b"IMPORTANT NEW LOG DATA THAT GREW")
+        monkeypatch.setattr(sweeper_view_module.threading, "Thread", _SyncThread)
+
+        view.execute_clean(use_trash=False)
+
+        # C2 refusal: the changed file survives and stays listed.
+        assert junk.exists()
+        assert junk.read_bytes() == b"IMPORTANT NEW LOG DATA THAT GREW"
+        assert [f.path for f in view.junk_files_list] == [str(junk)]
+
+    def test_unchanged_junk_file_deleted(self, tmp_path, monkeypatch):
+        """Positive control: an unchanged junk file IS deleted (the C2 check
+        must not block legitimate cleanup)."""
+        view = SweeperView(language="ru")
+        junk = tmp_path / "stale.tmp"
+        junk.write_bytes(b"junk")
+        st = junk.stat()
+        view.active_mode = "junk_files"
+        view.junk_files_list = [FileInfo(str(junk), junk.name, st.st_size, st.st_ctime, st.st_mtime)]
+        view.selected_items = {str(junk)}
+        view._scan_snapshots = {str(junk): (st.st_size, st.st_mtime)}
+        monkeypatch.setattr(sweeper_view_module.threading, "Thread", _SyncThread)
+
+        view.execute_clean(use_trash=False)
+
+        assert not junk.exists()
+        assert view.junk_files_list == []

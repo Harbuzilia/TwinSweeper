@@ -1,6 +1,7 @@
 import os
 import ctypes
 import ctypes.wintypes
+import glob
 import logging
 from typing import Tuple, List, Dict
 
@@ -49,6 +50,19 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     """
     if not os.path.exists(source_original) or not os.path.isfile(source_original):
         return False, get_text("hl_err_original_not_found").format(source_original), 0
+
+    # Recover from a crash in a PREVIOUS run that happened between the two
+    # renames: the duplicate is then orphaned at a .tmp_hl_backup_<oldpid>
+    # path with nothing at the target. Restore it so the file is not lost
+    # (round 3 — the old code just reported "duplicate not found").
+    if not os.path.exists(target_duplicate):
+        orphans = sorted(glob.glob(target_duplicate + ".tmp_hl_backup_*"))
+        if orphans:
+            try:
+                os.replace(orphans[-1], target_duplicate)
+            except OSError as ex:
+                logger.warning("could not restore orphaned hardlink backup %s: %s", orphans[-1], ex)
+
     if not os.path.exists(target_duplicate) or not os.path.isfile(target_duplicate):
         return False, get_text("hl_err_duplicate_not_found").format(target_duplicate), 0
 
@@ -157,6 +171,14 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
             continue
 
         for dup in duplicates:
+            # Already the same physical file (a pre-existing hardlink): there
+            # is nothing to free, and journaling it would let "undo" unlink
+            # files the user linked themselves long ago (round 3).
+            try:
+                if os.path.samefile(original, dup):
+                    continue
+            except OSError:
+                pass
             ok, err, freed = replace_with_hardlink(original, dup)
             if ok:
                 success_count += 1
