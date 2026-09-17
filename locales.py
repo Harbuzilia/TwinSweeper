@@ -46,6 +46,8 @@ translations = {
         "scanning": "Scanning in progress...",
         "scan_cancelled": "Scan was cancelled.",
         "please_select_dir": "Please select at least one folder to scan.",
+        "error_no_criteria": "Select at least one comparison criterion (size, hash, name or bytes).",
+        "compare_error": "Comparison failed: {0}",
         "no_duplicates": "Great news! No duplicate files found in selected folders.",
 
         # Similar Photos Screen (pHash)
@@ -285,6 +287,8 @@ translations = {
         "scanning": "Выполняется сканирование...",
         "scan_cancelled": "Сканирование отменено пользователем.",
         "please_select_dir": "Пожалуйста, выберите хотя бы одну папку.",
+        "error_no_criteria": "Выберите хотя бы один критерий сравнения (размер, хэш, имя или байты).",
+        "compare_error": "Ошибка сравнения: {0}",
         "no_duplicates": "Отлично! В выбранных папках дубликатов не обнаружено.",
 
         # Similar Photos Screen (pHash)

@@ -125,6 +125,9 @@ def scan_similar_images(
 
     # 2. Compute pHashes in parallel using SQLite Cache
     def get_or_calc_phash(info: FileInfo) -> Tuple[FileInfo, Optional[str]]:
+        # Cancel takes effect before opening/decoding the image.
+        if is_cancelled():
+            return info, None
         # Check SQLite Cache first
         cached_phash = cache_db.get_image_phash(info.path, info.size, info.modified)
         if cached_phash:
@@ -138,24 +141,32 @@ def scan_similar_images(
     hashed_images: List[Tuple[FileInfo, str]] = []
     processed = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(get_or_calc_phash, info): info for info in image_files}
-        for future in as_completed(futures):
-            if is_cancelled():
-                executor.shutdown(wait=False, cancel_futures=True)
-                return {}
-            try:
-                info, phash = future.result()
-                if phash:
-                    info.hash = phash
-                    hashed_images.append((info, phash))
-            except Exception:
-                pass
+    # No `with` block — see scanner.scan_directory: __exit__ would join
+    # in-flight phash tasks and freeze a "cancelled" scan.
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = {executor.submit(get_or_calc_phash, info): info for info in image_files}
+    cancelled = False
+    for future in as_completed(futures):
+        if is_cancelled():
+            cancelled = True
+            break
+        try:
+            info, phash = future.result()
+            if phash:
+                info.hash = phash
+                hashed_images.append((info, phash))
+        except Exception:
+            pass
 
-            processed += 1
-            if processed % 50 == 0 or processed == total_images:
-                pct = 0.1 + (processed / total_images) * 0.6
-                report(f"Hashed {processed}/{total_images} photos...", pct)
+        processed += 1
+        if processed % 50 == 0 or processed == total_images:
+            pct = 0.1 + (processed / total_images) * 0.6
+            report(f"Hashed {processed}/{total_images} photos...", pct)
+
+    if cancelled:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {}
+    executor.shutdown(wait=True)
 
     if is_cancelled() or len(hashed_images) < 2:
         return {}

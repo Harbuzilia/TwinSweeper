@@ -189,6 +189,12 @@ def scan_directory(
     """
     High-performance multi-threaded duplicate scanner with SQLite persistent cache.
     """
+    # All criteria off means "match nothing" — without this guard the scan
+    # returned EVERY indexed file as one duplicate group, pre-selected for
+    # deletion in the results UI.
+    if not (by_name or by_size or by_hash or by_byte):
+        raise ValueError("At least one comparison criterion (name/size/hash/bytes) must be enabled")
+
     def is_cancelled():
         return cancel_flag is not None and len(cancel_flag) > 0 and cancel_flag[0]
 
@@ -291,6 +297,10 @@ def scan_directory(
         processed_count = 0
 
         def compute_hash_for_file(info: FileInfo) -> tuple[FileInfo, Optional[str]]:
+            # Cancel must take effect BEFORE reading the file: queued tasks must
+            # not start hashing multi-GB files after the user pressed Cancel.
+            if is_cancelled():
+                return info, None
             # 1. Try SQLite cache first
             if use_cache:
                 cached_h = cache_db.get_file_hash(info.path, info.size, info.modified, turbo=turbo_mode)
@@ -308,23 +318,34 @@ def scan_directory(
                     cache_db.save_file_hash(info.path, info.size, info.modified, full_hash=h)
             return info, h
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(compute_hash_for_file, info): info for info in files_to_hash}
-            for future in as_completed(futures):
-                if is_cancelled():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    return {}
-                try:
-                    info, h = future.result()
-                    if h is not None:
-                        info.hash = h
-                except Exception:
-                    pass
+        # No `with` block: its __exit__ calls shutdown(wait=True) which JOINS
+        # in-flight tasks — a cancelled scan would block for as long as the
+        # currently-hashing files take (minutes for big files). On cancel we
+        # return immediately; queued futures are dropped, running ones finish
+        # in their own threads without holding the scan hostage.
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {executor.submit(compute_hash_for_file, info): info for info in files_to_hash}
+        cancelled = False
+        for future in as_completed(futures):
+            if is_cancelled():
+                cancelled = True
+                break
+            try:
+                info, h = future.result()
+                if h is not None:
+                    info.hash = h
+            except Exception:
+                pass
 
-                processed_count += 1
-                if processed_count % 50 == 0 or processed_count == total_candidates:
-                    pct = 0.1 + (processed_count / total_candidates) * 0.7
-                    report_progress(f"Hashed {processed_count}/{total_candidates} files...", pct)
+            processed_count += 1
+            if processed_count % 50 == 0 or processed_count == total_candidates:
+                pct = 0.1 + (processed_count / total_candidates) * 0.7
+                report_progress(f"Hashed {processed_count}/{total_candidates} files...", pct)
+
+        if cancelled:
+            executor.shutdown(wait=False, cancel_futures=True)
+            return {}
+        executor.shutdown(wait=True)
 
     # Group by Key
     grouped = defaultdict(list)
@@ -420,6 +441,9 @@ def scan_for_sample(
     cancel_flag: Optional[List[bool]] = None
 ) -> List[FileInfo]:
     """Finds duplicates of a specific sample file in the given directories."""
+    # All criteria off would report every walked file as a "copy" of the sample.
+    if not (by_name or by_size or by_hash or by_byte):
+        raise ValueError("At least one comparison criterion (name/size/hash/bytes) must be enabled")
     if not os.path.exists(sample_path) or not os.path.isfile(sample_path):
         return []
 

@@ -383,6 +383,20 @@ class SearchView(ft.Column):
             self.update()
             return
 
+        # pHash mode matches images by content, not by these checkboxes.
+        if self.active_preset != "phash" and not (
+            self.check_size.value or self.check_hash.value or self.check_name.value or self.check_byte.value
+        ):
+            # All criteria off would otherwise treat EVERY file as one duplicate
+            # group, pre-selected for deletion.
+            self.progress_text.value = get_text("error_no_criteria", self.language)
+            self.progress_text.color = DANGER_COLOR
+            self.status_icon.visible = True
+            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.color = DANGER_COLOR
+            self.update()
+            return
+
         self.start_button.visible = False
         self.cancel_button.visible = True
         self.progress_bar.visible = True

@@ -17,6 +17,9 @@ def find_empty_directories(
     Finds empty directories and recursively empty subdirectories in bottom-up order.
     """
     empty_folders = []
+    # Parallel set for membership — the list-lookup below was O(n) per listing
+    # entry and dominated the scan on trees with thousands of empty folders.
+    empty_set = set()
     total_checked = 0
 
     for directory in directories:
@@ -40,20 +43,31 @@ def find_empty_directories(
             try:
                 contents = os.listdir(root)
                 # Filter out contents that are already in empty_folders
-                remaining = [c for c in contents if os.path.join(root, c) not in empty_folders]
+                remaining = [c for c in contents if os.path.join(root, c) not in empty_set]
                 if not remaining:
                     empty_folders.append(root)
+                    empty_set.add(root)
             except (OSError, PermissionError):
                 continue
 
     return empty_folders
 
 def delete_empty_directories(folders: List[str]) -> Tuple[int, List[str]]:
-    """Removes empty directories (ordered deepest first)."""
+    """Removes empty directories, deepest first.
+
+    The caller may pass an arbitrary (e.g. set-derived, hash-random) order —
+    deleting a parent before its children just fails with "directory not
+    empty", which used to leave most of a nested tree behind on the first
+    pass. `os.rmdir` itself only ever removes a truly empty directory."""
     deleted_count = 0
     errors = []
 
-    for folder in folders:
+    ordered = sorted(
+        set(folders),
+        key=lambda p: len(os.path.normpath(p).split(os.sep)),
+        reverse=True,
+    )
+    for folder in ordered:
         try:
             os.rmdir(folder)
             deleted_count += 1

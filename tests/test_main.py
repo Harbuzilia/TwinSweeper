@@ -77,3 +77,29 @@ class TestCompareFallbackSchema:
         assert main.EMPTY_COMPARE_RESULT["unique_b"] == []
         assert main.EMPTY_COMPARE_RESULT["common"] == []
         assert main.EMPTY_COMPARE_RESULT["total_files"] == 0
+
+
+class TestBuildHardlinkLogPairs:
+    """Round-2 regression: group entries are (path, size, mtime) tuples while
+    succeeded paths are plain strings — the old direct comparison never
+    matched, so hardlink operations were never journaled and undo was dead."""
+
+    def test_only_actually_linked_pairs_are_journaled(self):
+        groups_map = {
+            "orig/a.jpg": [("dup1.jpg", 10, 1.0), ("dup2.jpg", 20, 2.0)],
+            "orig/b.jpg": [("dup3.jpg", 30, 3.0)],
+        }
+        pairs = main.build_hardlink_log_pairs(groups_map, ["dup1.jpg", "dup3.jpg"])
+        assert pairs == [("orig/a.jpg", "dup1.jpg"), ("orig/b.jpg", "dup3.jpg")]
+
+    def test_tuple_entries_match_string_paths(self):
+        groups_map = {"o.txt": [("d.txt", 1, 1.0)]}
+        assert main.build_hardlink_log_pairs(groups_map, ["d.txt"]) == [("o.txt", "d.txt")]
+
+    def test_nothing_succeeded_yields_no_pairs(self):
+        groups_map = {"o.txt": [("d.txt", 1, 1.0)]}
+        assert main.build_hardlink_log_pairs(groups_map, []) == []
+
+    def test_dedupes_succeeded_paths(self):
+        groups_map = {"o.txt": [("d.txt", 1, 1.0)]}
+        assert main.build_hardlink_log_pairs(groups_map, ["d.txt", "d.txt"]) == [("o.txt", "d.txt")]

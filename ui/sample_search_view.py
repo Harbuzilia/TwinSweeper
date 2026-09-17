@@ -248,6 +248,19 @@ class SampleSearchView(ft.Column):
             self.update()
             return
 
+        # All criteria off would otherwise report every walked file as a copy
+        # of the sample.
+        if not (
+            self.check_size.value or self.check_hash.value or self.check_name.value or self.check_byte.value
+        ):
+            self.status_text.value = get_text("error_no_criteria", self.language)
+            self.status_text.color = DANGER_COLOR
+            self.status_icon.visible = True
+            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.color = DANGER_COLOR
+            self.update()
+            return
+
         self.start_button.visible = False
         self.cancel_button.visible = True
         self.progress_bar.visible = True

@@ -426,3 +426,83 @@ class TestComputeWastedBytes:
         g1 = [self._info("a.bin", 10), self._info("b.bin", 10)]
         g2 = [self._info("c.bin", 5), self._info("d.bin", 9)]
         assert scanner.compute_wasted_bytes({"h1": g1, "h2": g2}) == 19
+
+
+class TestCriteriaGuard:
+    """Round-2 P0: with every criterion disabled the scan used to return ALL
+    files as one duplicate group, pre-selected for deletion in the UI."""
+
+    def test_scan_directory_rejects_all_criteria_off(self, tmp_path):
+        with pytest.raises(ValueError):
+            scan_directory([str(tmp_path)], by_name=False, by_size=False, by_hash=False, by_byte=False)
+
+    def test_scan_for_sample_rejects_all_criteria_off(self, tmp_path):
+        sample = tmp_path / "s.txt"
+        sample.write_text("x")
+        with pytest.raises(ValueError):
+            scan_for_sample(str(sample), [str(tmp_path)], by_name=False, by_size=False, by_hash=False, by_byte=False)
+
+
+class TestCancelDuringHash:
+    """Round-2 P0: a cancelled scan must return immediately. The old
+    `with ThreadPoolExecutor` block joined in-flight tasks on exit
+    (shutdown(wait=True) via __exit__), so "cancelled" scans kept hashing."""
+
+    def test_cancel_returns_without_waiting_for_running_hashes(self, tmp_path, monkeypatch):
+        for i in range(8):
+            (tmp_path / f"f{i}.bin").write_bytes(b"x" * 100)
+
+        flag = [False]
+        real_hash = scanner.get_file_hash
+
+        def cancel_hash(path):
+            if os.path.basename(path) == "f0.bin":
+                flag[0] = True  # flip the flag from inside the first completed hash
+                return real_hash(path)
+            time.sleep(1.2)
+            return real_hash(path)
+
+        monkeypatch.setattr(scanner, "get_file_hash", cancel_hash)
+
+        started = time.monotonic()
+        results = scan_directory(
+            [str(tmp_path)],
+            by_hash=True,
+            turbo_mode=False,
+            use_cache=False,
+            cancel_flag=flag,
+            max_workers=8,
+        )
+        elapsed = time.monotonic() - started
+
+        assert results == {}
+        # Old behavior waited for the 7 sleeping tasks (~1.2 s+); the fix
+        # returns as soon as cancellation is observed.
+        assert elapsed < 0.7
+
+    def test_queued_hash_tasks_skip_work_after_cancel(self, tmp_path, monkeypatch):
+        """The per-task cancel check: with 1 worker and 6 files, flipping the
+        flag during the first hash must prevent the rest from hashing at all."""
+        for i in range(6):
+            (tmp_path / f"g{i}.bin").write_bytes(b"x" * 100)
+
+        flag = [False]
+        calls = {"n": 0}
+
+        def counting_hash(path):
+            calls["n"] += 1
+            flag[0] = True  # cancel everything after the very first hash
+            return "deadbeef"
+
+        monkeypatch.setattr(scanner, "get_file_hash", counting_hash)
+
+        results = scan_directory(
+            [str(tmp_path)],
+            by_hash=True,
+            turbo_mode=False,
+            use_cache=False,
+            cancel_flag=flag,
+            max_workers=1,
+        )
+        assert results == {}
+        assert calls["n"] == 1

@@ -145,6 +145,25 @@ def unregister_context_menu():
     except Exception as ex:
         return False, str(ex)
 
+def build_hardlink_log_pairs(
+    groups_map: Dict[str, List[Tuple[str, int, float]]], succeeded_paths: List[str]
+) -> List[Tuple[str, str]]:
+    """(original, duplicate_path) pairs for the operations journal — only files
+    that were actually hardlinked.
+
+    groups_map values hold (path, size, mtime) snapshots from ResultsView (C2),
+    while batch_replace_with_hardlinks returns plain path strings. The two
+    shapes must be reconciled explicitly: comparing a tuple against a string
+    never matches, which once left hardlink operations unjournaled — and
+    hardlink undo dead — despite the linking itself succeeding."""
+    succeeded = set(succeeded_paths)
+    return [
+        (original, entry[0])
+        for original, entries in groups_map.items()
+        for entry in entries
+        if entry[0] in succeeded
+    ]
+
 def main(page: ft.Page):
     # File log lives next to scan_cache.db (DUPLICATER_DATA_DIR redirects it in tests).
     setup_logging(get_data_dir())
@@ -328,17 +347,25 @@ def main(page: ft.Page):
 
         page.run_thread(_worker)
 
-    def run_compare(folder_a: str, folder_b: str, result_callback, progress_callback):
+    def run_compare(folder_a: str, folder_b: str, result_callback, progress_callback, error_callback=None):
         def _worker():
-            results = None
             try:
                 results = compare_folders(folder_a, folder_b, progress_callback)
             except Exception as ex:
-                progress_callback(f"Error: {ex}", None)
-            finally:
-                # H2: the fallback must mirror the real compare_folders schema,
-                # otherwise the results view dies on a KeyError.
-                result_callback(results or EMPTY_COMPARE_RESULT)
+                # progress_callback takes exactly one message argument — the old
+                # two-arg call raised a second TypeError right inside this handler,
+                # and the swallowed crash left the progress bar spinning forever.
+                msg = get_text("compare_error", current_language).format(ex)
+                if error_callback:
+                    error_callback(msg)
+                else:
+                    progress_callback(msg)
+                # An error must not be rendered as "folders have nothing in
+                # common" — that would invite a wrong user decision (M8 pattern).
+                return
+            # H2: the fallback must mirror the real compare_folders schema,
+            # otherwise the results view dies on a KeyError.
+            result_callback(results or EMPTY_COMPARE_RESULT)
 
         page.run_thread(_worker)
 
@@ -484,8 +511,7 @@ def main(page: ft.Page):
                 results_view_instance.remove_files(state["succeeded_paths"])
 
             if state["succeeded_paths"]:
-                succeeded_set = set(state["succeeded_paths"])
-                pairs = [(orig, dup) for orig, dups in groups_map.items() for dup in dups if dup in succeeded_set]
+                pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
                 if pairs:
                     log_hardlink_operation(pairs, state["freed_bytes"])
 

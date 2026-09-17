@@ -180,3 +180,38 @@ class TestShortcuts:
         target.write_text("x")
         lnk = make_lnk(tmp_path / "юникод.lnk", str(target))
         assert resolve_windows_shortcut_target(lnk) == str(target)
+
+
+class TestNestedEmptyDirectoryDeletion:
+    """Round-2 P0: callers pass set-derived (hash-random) folder order; deleting
+    a parent before its children failed with "not empty" and left the tree
+    behind. Deletion must sort deepest-first itself."""
+
+    def test_parent_first_input_still_deletes_whole_chain(self, tmp_path):
+        deep = tmp_path / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        worst_case_order = [str(tmp_path / "a"), str(tmp_path / "a" / "b"), str(deep)]
+        count, errors = delete_empty_directories(worst_case_order)
+        assert count == 3
+        assert errors == []
+        assert not os.path.exists(str(tmp_path / "a"))
+
+    def test_input_duplicates_are_deduped(self, tmp_path):
+        d = tmp_path / "solo"
+        d.mkdir()
+        count, errors = delete_empty_directories([str(d), str(d)])
+        assert count == 1
+        assert errors == []
+        assert not d.exists()
+
+    def test_deep_skeleton_removed_in_one_pass(self, tmp_path):
+        root = tmp_path / "skel"
+        for i in range(5):
+            (root / f"l{i}" / "inner" / "leaf").mkdir(parents=True)
+        found = find_empty_directories([str(tmp_path)])
+        assert len(found) >= 15
+        # Reverse of the (already bottom-up) discovery order — pure adversarial.
+        count, errors = delete_empty_directories(list(reversed(found)))
+        assert count == len(found)
+        assert errors == []
+        assert not root.exists()

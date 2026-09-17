@@ -162,35 +162,50 @@ class CompareView(ft.Column):
         if not self.folder_a or not self.folder_b:
             self.status_text.value = get_text("error_select_both", self.language)
             self.status_text.color = DANGER_COLOR
-            self.update()
+            self._safe_update()
             return
 
         if not os.path.isdir(self.folder_a) or not os.path.isdir(self.folder_b):
             self.status_text.value = get_text("error_folder_not_found", self.language)
             self.status_text.color = DANGER_COLOR
-            self.update()
+            self._safe_update()
             return
 
         self.progress_bar.visible = True
         self.status_text.value = get_text("comparing", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.results_container.controls.clear()
-        self.update()
+        self._safe_update()
 
         self.on_compare_start(
             self.folder_a,
             self.folder_b,
             self.show_results,
-            self.update_status
+            self.update_status,
+            self.show_error
         )
 
-    def update_status(self, message: str):
-        self.status_text.value = message
+    def _safe_update(self):
+        """Headless/unmounted-safe update — flet's Control.page raises
+        RuntimeError (not None) for controls not yet added to a page."""
         if self.parent is not None:
             try:
                 self.update()
             except RuntimeError:
                 pass
+
+    def update_status(self, message: str):
+        self.status_text.value = message
+        self._safe_update()
+
+    def show_error(self, message: str):
+        """A failed comparison is an error state, not an empty result —
+        hiding the progress bar and coloring the status red tells the user
+        something actually went wrong."""
+        self.progress_bar.visible = False
+        self.status_text.value = message
+        self.status_text.color = DANGER_COLOR
+        self._safe_update()
 
     def show_results(self, results: dict):
         if self.parent is None:
