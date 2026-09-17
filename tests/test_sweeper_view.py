@@ -163,3 +163,59 @@ class TestEmptyFolderDeletion:
         assert occupied.exists()
         assert view.empty_folders_list == [str(occupied)]
         assert isolated_ops_log.load_operations() == []
+
+
+class TestSweepWorkerExecution:
+    """Round 2: workers go through page.run_thread when the view is on a page
+    (flet context — the H3 fix finally applied to the sweeper too), and the
+    scan/clean flow guards against re-entry."""
+
+    def test_run_worker_prefers_page_run_thread(self, tmp_path, monkeypatch):
+        view, _ = make_junk_view(tmp_path)
+        launched = []
+
+        class RunThreadPage:
+            def run_thread(self, fn):
+                launched.append(fn)
+
+        monkeypatch.setattr(SweeperView, "_page_or_none", lambda self: RunThreadPage())
+        view._run_worker(lambda: None)
+        assert len(launched) == 1
+
+    def test_run_worker_falls_back_to_plain_thread(self, tmp_path, monkeypatch):
+        view, _ = make_junk_view(tmp_path)
+        ran = []
+        monkeypatch.setattr(sweeper_view_module.threading, "Thread", _SyncThread)
+        # FakePage has no run_thread — the headless fallback must engage.
+        monkeypatch.setattr(SweeperView, "_page_or_none", lambda self: FakePage())
+        view._run_worker(lambda: ran.append(1))
+        assert ran == [1]
+
+    def test_cancel_button_sets_flag_and_hides_itself(self, tmp_path):
+        view, _ = make_junk_view(tmp_path)
+        view.cancel_sweep_scan(None)
+        assert view.cancel_flag[0] is True
+        assert view.cancel_button.visible is False
+
+    def test_scan_start_is_blocked_while_busy(self, tmp_path):
+        view, _ = make_junk_view(tmp_path)
+        view.selected_directories = [str(tmp_path)]
+        view._scan_busy = True
+        view.status_text.value = "untouched"
+        view.start_sweep_scan(None)
+        assert view.status_text.value == "untouched"
+
+    def test_full_scan_flow_finds_junk_and_resets_busy(self, tmp_path, monkeypatch):
+        (tmp_path / "another.tmp").write_bytes(b"y" * 7)
+        view, _ = make_junk_view(tmp_path)
+        view.selected_directories = [str(tmp_path)]
+        monkeypatch.setattr(sweeper_view_module.threading, "Thread", _SyncThread)
+        monkeypatch.setattr(SweeperView, "_page_or_none", lambda self: FakePage())
+        monkeypatch.setattr(SweeperView, "update", lambda self: None)
+
+        view.start_sweep_scan(None)
+
+        assert view._scan_busy is False
+        assert len(view.junk_files_list) == 2
+        assert view.scan_button.visible is True
+        assert view.cancel_button.visible is False

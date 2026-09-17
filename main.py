@@ -2,6 +2,7 @@ import flet as ft
 import os
 import sys
 import json
+import threading
 from datetime import datetime
 from typing import List, Dict, Tuple
 
@@ -32,10 +33,12 @@ from ui.components import (
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, DANGER_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED
 )
-from locales import get_text
+from locales import get_text, set_current_language
 from app_logging import setup_logging, get_logger
 
 logger = get_logger(__name__)
+
+APP_VERSION = "3.6"
 
 try:
     from send2trash import send2trash
@@ -44,6 +47,45 @@ except ImportError:
     HAS_SEND2TRASH = False
 
 HISTORY_FILE = os.path.join(get_data_dir(), "scan_history.json")
+
+# Scan history is written from worker threads while other operations append
+# too — same locked read-modify-write discipline as the operations journal.
+_history_lock = threading.RLock()
+
+SETTINGS_FILE = os.path.join(get_data_dir(), "settings.json")
+
+DEFAULT_SETTINGS = {"language": "ru", "theme": "dark_slate", "trash_default": True}
+_settings_lock = threading.RLock()
+
+
+def load_settings() -> dict:
+    """Persisted user settings (language / theme / trash-by-default). Written
+    from the UI thread; unknown or missing keys fall back to the defaults."""
+    with _settings_lock:
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        merged = dict(DEFAULT_SETTINGS)
+                        merged.update(data)
+                        return merged
+        except Exception as ex:
+            logger.warning("settings unreadable: %s", ex)
+        return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(updates: dict) -> None:
+    with _settings_lock:
+        settings = load_settings()
+        settings.update(updates)
+        tmp_path = SETTINGS_FILE + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, SETTINGS_FILE)
+        except Exception as ex:
+            logger.warning("settings write failed: %s", ex)
 
 # Schema mirror of scanner.compare_folders output — safe fallback when the
 # comparison fails (H2: a mismatched shape used to crash the results UI).
@@ -56,38 +98,46 @@ def verify_file_unchanged(path: str, expected_size: int, expected_mtime: float) 
     try:
         stat = os.stat(path)
     except OSError as ex:
-        return False, f"file not accessible ({ex})"
+        return False, get_text("verify_failed_access").format(ex)
     if stat.st_size != expected_size:
-        return False, f"size changed ({expected_size} -> {stat.st_size} bytes)"
+        return False, get_text("verify_failed_size").format(expected_size, stat.st_size)
     if abs(stat.st_mtime - expected_mtime) > 0.001:
-        return False, "modified time changed since scan"
+        return False, get_text("verify_failed_mtime")
     return True, ""
 
 def load_history() -> List[dict]:
-    try:
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
+    with _history_lock:
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as ex:
+            logger.warning("scan history unreadable: %s", ex)
+        return []
 
 def save_history(history: List[dict]):
-    try:
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history[-30:], f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    # Atomic write: a crash mid-save must not destroy the history file.
+    with _history_lock:
+        tmp_path = HISTORY_FILE + ".tmp"
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(history[-30:], f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, HISTORY_FILE)
+        except Exception as ex:
+            logger.warning("scan history write failed: %s", ex)
 
 def add_to_history(directories: List[str], duplicates_found: int, wasted_space: int):
-    history = load_history()
-    history.append({
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "folders": directories,
-        "duplicates": duplicates_found,
-        "wasted": wasted_space
-    })
-    save_history(history)
+    # Locked read-modify-write: the delete worker's journaling and a fresh
+    # scan's history append could interleave and drop entries.
+    with _history_lock:
+        history = load_history()
+        history.append({
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "folders": directories,
+            "duplicates": duplicates_found,
+            "wasted": wasted_space
+        })
+        save_history(history)
 
 # Windows Context Menu Integration Helpers
 def is_context_menu_registered() -> bool:
@@ -167,11 +217,18 @@ def build_hardlink_log_pairs(
 def main(page: ft.Page):
     # File log lives next to scan_cache.db (DUPLICATER_DATA_DIR redirects it in tests).
     setup_logging(get_data_dir())
-    logger.info("Duplicater started (log file initialized)")
+    logger.info("Duplicater %s started (log file initialized)", APP_VERSION)
+
+    # Persisted settings (round 2: language/theme/trash default used to reset
+    # to hardcoded values on every launch).
+    app_settings = load_settings()
+    current_language = app_settings.get("language", "ru")
+    set_current_language(current_language)  # core modules localize progress too
+    trash_default = [bool(app_settings.get("trash_default", True))]
 
     # App Window & Appearance
-    page.title = "Duplicater"
-    page.theme_mode = ft.ThemeMode.DARK
+    page.title = get_text("app_title", current_language)
+    page.theme_mode = ft.ThemeMode.LIGHT if app_settings.get("theme") == "light_clean" else ft.ThemeMode.DARK
     page.bgcolor = BG_COLOR
     page.padding = 0
     page.theme = ft.Theme(
@@ -182,9 +239,22 @@ def main(page: ft.Page):
             radius=4,
         )
     )
-    current_language = "ru"
+    saved_theme = app_settings.get("theme")
+    if saved_theme:
+        set_active_theme(saved_theme)
+        page.bgcolor = get_current_theme()["BG_COLOR"]
     current_nav_index = 0
-    cancel_flag = [False]
+
+    # True while the results screen (not a nav tab) is displayed — a language
+    # or theme switch must not destroy the user's open results.
+    showing_results = [False]
+    # Live tab views: switching tabs used to recreate every view, wiping the
+    # sweeper results, compare state and search filters each time.
+    view_cache: Dict[int, ft.Control] = {}
+
+    def set_trash_default(value: bool):
+        trash_default[0] = bool(value)
+        save_settings({"trash_default": bool(value)})
 
     # CLI Directory Arguments
     initial_cli_dirs = []
@@ -198,11 +268,23 @@ def main(page: ft.Page):
     def set_language(lang: str):
         nonlocal current_language
         current_language = lang
+        save_settings({"language": lang})
+        set_current_language(lang)
         page.title = get_text("app_title", lang)
+        # Cached views carry their build-time language — rebuild them lazily.
+        view_cache.clear()
+        if showing_results[0]:
+            # Keep the open results: rebuilding the current tab would silently
+            # discard the user's selection and filters. The sidebar still
+            # re-renders in the new language.
+            render_app_shell()
+            page.update()
+            return
         on_nav_change(current_nav_index)
 
     def change_theme(theme_name: str):
         set_active_theme(theme_name)
+        save_settings({"theme": theme_name})
         theme_colors = get_current_theme()
         page.bgcolor = theme_colors["BG_COLOR"]
         page.theme_mode = ft.ThemeMode.LIGHT if theme_name == "light_clean" else ft.ThemeMode.DARK
@@ -214,10 +296,13 @@ def main(page: ft.Page):
                 radius=4,
             )
         )
+        view_cache.clear()
+        if showing_results[0]:
+            # Same reasoning as set_language: results survive a theme switch.
+            render_app_shell()
+            page.update()
+            return
         on_nav_change(current_nav_index)
-
-    def cancel_scan():
-        cancel_flag[0] = True
 
     # Scan Runners
     def run_scan(
@@ -236,9 +321,15 @@ def main(page: ft.Page):
         is_phash=False,
         phash_threshold=0.90
     ):
-        cancel_flag[0] = False
+        # Per-run cancel token: the previously shared flag let a newly started
+        # scan reset (or cancel) another still-running one.
+        run_cancel = [False]
+
+        def cancel_this_run():
+            run_cancel[0] = True
+
         if on_cancel_setup:
-            on_cancel_setup(cancel_scan)
+            on_cancel_setup(cancel_this_run)
 
         def _worker():
             results = {}
@@ -249,7 +340,7 @@ def main(page: ft.Page):
                         directories=directories,
                         similarity_threshold=phash_threshold,
                         progress_callback=progress_callback,
-                        cancel_flag=cancel_flag,
+                        cancel_flag=run_cancel,
                         exclude_patterns=exclude_patterns
                     )
                 else:
@@ -260,7 +351,7 @@ def main(page: ft.Page):
                         by_hash=by_hash,
                         by_byte=by_byte,
                         progress_callback=progress_callback,
-                        cancel_flag=cancel_flag,
+                        cancel_flag=run_cancel,
                         exclude_patterns=exclude_patterns,
                         turbo_mode=turbo_mode,
                         min_size_bytes=min_size_bytes,
@@ -268,12 +359,12 @@ def main(page: ft.Page):
                     )
             except Exception as ex:
                 had_error = True
-                progress_callback(f"Error: {ex}", None)
+                progress_callback(get_text("scan_error").format(ex), None)
             finally:
                 if on_scan_finished:
                     on_scan_finished()
 
-            if cancel_flag[0]:
+            if run_cancel[0]:
                 progress_callback(get_text("scan_cancelled", current_language), None)
                 return
             # M8: a failed scan must not be reported as "no duplicates found".
@@ -303,9 +394,14 @@ def main(page: ft.Page):
         on_cancel_setup=None,
         on_scan_finished=None
     ):
-        cancel_flag[0] = False
+        # Per-run cancel token (same reasoning as run_scan).
+        run_cancel = [False]
+
+        def cancel_this_run():
+            run_cancel[0] = True
+
         if on_cancel_setup:
-            on_cancel_setup(cancel_scan)
+            on_cancel_setup(cancel_this_run)
 
         def _worker():
             found_files = []
@@ -319,16 +415,16 @@ def main(page: ft.Page):
                     by_hash=by_hash,
                     by_byte=by_byte,
                     progress_callback=progress_callback,
-                    cancel_flag=cancel_flag
+                    cancel_flag=run_cancel
                 )
             except Exception as ex:
                 had_error = True
-                progress_callback(f"Error: {ex}", None)
+                progress_callback(get_text("scan_error").format(ex), None)
             finally:
                 if on_scan_finished:
                     on_scan_finished()
 
-            if cancel_flag[0]:
+            if run_cancel[0]:
                 progress_callback(get_text("scan_cancelled", current_language), None)
                 return
             if had_error:
@@ -373,6 +469,7 @@ def main(page: ft.Page):
     def show_results_screen(results: Dict[str, List[FileInfo]], allow_hardlink: bool = True):
         nonlocal results_view_instance
         def on_back():
+            showing_results[0] = False
             on_nav_change(0)
             if search_view_instance:
                 search_view_instance.reset_state()
@@ -383,69 +480,79 @@ def main(page: ft.Page):
             on_delete=delete_files_handler,
             on_hardlink=hardlink_files_handler,
             language=current_language,
-            allow_hardlink=allow_hardlink
+            allow_hardlink=allow_hardlink,
+            trash_default=trash_default[0]
         )
+        showing_results[0] = True
         main_content_container.content = results_view_instance
         page.update()
 
     def delete_files_handler(file_entries: List[Tuple[str, int, float]], use_trash: bool = True):
         """file_entries: (path, size, mtime) snapshots taken during the scan —
         each file is re-verified before deletion (C2 TOCTOU guard)."""
+        # Capture the view NOW: the worker must not act on a *different*
+        # ResultsView if the user pressed Back and rescanned mid-delete.
+        target_view = results_view_instance
         total = len(file_entries)
         state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": []}
 
         def _worker():
-            CHUNK = 200
-            for start in range(0, total, CHUNK):
-                chunk = file_entries[start:start + CHUNK]
-                for path, expected_size, expected_mtime in chunk:
-                    # C2: only delete the file that was actually scanned.
-                    ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-                    if not ok:
-                        state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
-                        continue
-                    try:
-                        if use_trash and HAS_SEND2TRASH:
-                            try:
-                                send2trash(path)
-                            except Exception as trash_ex:
-                                # H5: a failed move to the Recycle Bin must never
-                                # silently become an unrecoverable delete.
-                                state["errors"].append(get_text("trash_failed", current_language).format(path, trash_ex))
-                                continue
-                        else:
-                            os.remove(path)
-                        state["deleted_count"] += 1
-                        state["total_freed"] += expected_size
-                        state["actually_deleted"].append(path)
-                    except Exception as ex:
-                        state["errors"].append(get_text("error_delete", current_language).format(path, ex))
+            try:
+                CHUNK = 200
+                for start in range(0, total, CHUNK):
+                    chunk = file_entries[start:start + CHUNK]
+                    for path, expected_size, expected_mtime in chunk:
+                        # C2: only delete the file that was actually scanned.
+                        ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+                        if not ok:
+                            state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
+                            continue
+                        try:
+                            if use_trash and HAS_SEND2TRASH:
+                                try:
+                                    send2trash(path)
+                                except Exception as trash_ex:
+                                    # H5: a failed move to the Recycle Bin must never
+                                    # silently become an unrecoverable delete.
+                                    state["errors"].append(get_text("trash_failed", current_language).format(path, trash_ex))
+                                    continue
+                            else:
+                                os.remove(path)
+                            state["deleted_count"] += 1
+                            state["total_freed"] += expected_size
+                            state["actually_deleted"].append(path)
+                        except Exception as ex:
+                            state["errors"].append(get_text("error_delete", current_language).format(path, ex))
 
-                # Update progress
-                done = min(start + CHUNK, total)
-                if results_view_instance:
-                    results_view_instance.operation_progress.value = done / total
-                    results_view_instance.operation_status.value = get_text("deleting", current_language).format(state["deleted_count"], total)
-                    try:
-                        page.update()
-                    except Exception:
-                        pass
+                    # Update progress
+                    done = min(start + CHUNK, total)
+                    if target_view is not None:
+                        target_view.operation_progress.value = done / total
+                        target_view.operation_status.value = get_text("deleting", current_language).format(state["deleted_count"], total)
+                        try:
+                            page.update()
+                        except Exception:
+                            pass
 
-            # Hide progress
-            if results_view_instance:
-                results_view_instance.operation_progress.visible = False
-                results_view_instance.operation_status.visible = False
+                # Hide progress
+                if target_view is not None:
+                    target_view.operation_progress.visible = False
+                    target_view.operation_status.visible = False
 
-            if results_view_instance and state["actually_deleted"]:
-                results_view_instance.remove_files(state["actually_deleted"])
+                if target_view is not None and state["actually_deleted"]:
+                    target_view.remove_files(state["actually_deleted"])
 
-            if state["actually_deleted"]:
-                log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+                if state["actually_deleted"]:
+                    log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+            finally:
+                # Whatever happened, the action buttons must become clickable again.
+                if target_view is not None:
+                    target_view._operation_busy = False
 
             msg = get_text("deleted_count", current_language).format(state["deleted_count"])
             msg += "\n" + get_text("deleted_space_freed", current_language).format(format_file_size(state["total_freed"]))
             if state["errors"]:
-                msg += "\n\nErrors:\n" + "\n".join(state["errors"][:5])
+                msg += "\n\n" + get_text("dlg_errors_list") + ":\n" + "\n".join(state["errors"][:5])
 
             dlg = get_styled_dialog(
                 title=get_text("deletion_complete", current_language),
@@ -466,59 +573,66 @@ def main(page: ft.Page):
     def hardlink_files_handler(groups_map: Dict[str, List[Tuple[str, int, float]]]):
         """groups_map: {original_path: [(dupe_path, size, mtime), ...]} — each
         duplicate is re-verified before linking (C2 TOCTOU guard)."""
+        # Capture the view now — same reasoning as delete_files_handler.
+        target_view = results_view_instance
         total_dupes = sum(len(dups) for dups in groups_map.values())
         state = {"success_count": 0, "freed_bytes": 0, "errors": [], "succeeded_paths": []}
 
         def _worker():
-            CHUNK = 200
-            items = [(orig, dup) for orig, dups in groups_map.items() for dup in dups]
-            processed = 0
-            for start in range(0, len(items), CHUNK):
-                chunk = items[start:start + CHUNK]
-                chunk_map = {}
-                for orig, dup_entry in chunk:
-                    path, expected_size, expected_mtime = dup_entry
-                    # C2: only link the file that was actually scanned.
-                    ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-                    if not ok:
-                        state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
-                        continue
-                    chunk_map.setdefault(orig, []).append(path)
-                if chunk_map:
-                    sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
-                    state["success_count"] += sc
-                    state["freed_bytes"] += fb
-                    state["errors"].extend(errs)
-                    state["succeeded_paths"].extend(sp)
-                processed += len(chunk)
+            try:
+                CHUNK = 200
+                items = [(orig, dup) for orig, dups in groups_map.items() for dup in dups]
+                processed = 0
+                for start in range(0, len(items), CHUNK):
+                    chunk = items[start:start + CHUNK]
+                    chunk_map = {}
+                    for orig, dup_entry in chunk:
+                        path, expected_size, expected_mtime = dup_entry
+                        # C2: only link the file that was actually scanned.
+                        ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+                        if not ok:
+                            state["errors"].append(get_text("error_verify_failed", current_language).format(path, reason))
+                            continue
+                        chunk_map.setdefault(orig, []).append(path)
+                    if chunk_map:
+                        sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
+                        state["success_count"] += sc
+                        state["freed_bytes"] += fb
+                        state["errors"].extend(errs)
+                        state["succeeded_paths"].extend(sp)
+                    processed += len(chunk)
 
-                # Update progress
-                if results_view_instance:
-                    results_view_instance.operation_progress.value = processed / total_dupes if total_dupes else 1
-                    results_view_instance.operation_status.value = get_text("hardlinking", current_language).format(state["success_count"], total_dupes)
-                    try:
-                        page.update()
-                    except Exception:
-                        pass
+                    # Update progress
+                    if target_view is not None:
+                        target_view.operation_progress.value = processed / total_dupes if total_dupes else 1
+                        target_view.operation_status.value = get_text("hardlinking", current_language).format(state["success_count"], total_dupes)
+                        try:
+                            page.update()
+                        except Exception:
+                            pass
 
-            # Hide progress
-            if results_view_instance:
-                results_view_instance.operation_progress.visible = False
-                results_view_instance.operation_status.visible = False
+                # Hide progress
+                if target_view is not None:
+                    target_view.operation_progress.visible = False
+                    target_view.operation_status.visible = False
 
-            # Remove only files that were actually replaced; failed ones stay selectable.
-            if results_view_instance and state["succeeded_paths"]:
-                results_view_instance.remove_files(state["succeeded_paths"])
+                # Remove only files that were actually replaced; failed ones stay selectable.
+                if target_view is not None and state["succeeded_paths"]:
+                    target_view.remove_files(state["succeeded_paths"])
 
-            if state["succeeded_paths"]:
-                pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
-                if pairs:
-                    log_hardlink_operation(pairs, state["freed_bytes"])
+                if state["succeeded_paths"]:
+                    pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
+                    if pairs:
+                        log_hardlink_operation(pairs, state["freed_bytes"])
+            finally:
+                # Whatever happened, the action buttons must become clickable again.
+                if target_view is not None:
+                    target_view._operation_busy = False
 
             msg = get_text("hardlink_success_msg", current_language).format(state["success_count"])
             msg += "\n" + get_text("hardlink_space_saved", current_language).format(format_file_size(state["freed_bytes"]))
             if state["errors"]:
-                msg += "\n\nWarnings/Errors:\n" + "\n".join(state["errors"][:4])
+                msg += "\n\n" + get_text("dlg_warnings_list") + ":\n" + "\n".join(state["errors"][:4])
 
             dlg = get_styled_dialog(
                 title=get_text("hardlink_complete", current_language),
@@ -730,7 +844,7 @@ def main(page: ft.Page):
                 ok, err = unregister_context_menu()
                 msg = get_text("context_menu_removed", current_language) if ok else f"Error: {err}"
             else:
-                ok, err = register_context_menu("Найти дубликаты в Duplicater" if current_language == "ru" else "Scan Duplicates with Duplicater")
+                ok, err = register_context_menu(get_text("context_menu_action_title"))
                 msg = get_text("context_menu_added", current_language) if ok else f"Error: {err}"
 
             dlg = get_styled_dialog(
@@ -793,7 +907,8 @@ def main(page: ft.Page):
                     # Recycle bin
                     ft.Checkbox(
                         label=get_text("default_trash_setting", current_language),
-                        value=True,
+                        value=trash_default[0],
+                        on_change=lambda e: set_trash_default(e.control.value),
                         disabled=not HAS_SEND2TRASH
                     ),
                     ft.Divider(color=BORDER_COLOR, height=20),
@@ -833,11 +948,16 @@ def main(page: ft.Page):
     def on_nav_change(index: int):
         nonlocal current_nav_index, search_view_instance, initial_cli_dirs
         current_nav_index = index
+        showing_results[0] = False
 
-        if index == 0:
-            # Carry the user's folder selection across tab switches; CLI-provided
-            # folders are applied exactly once on the first visit.
-            previous_dirs = list(search_view_instance.selected_directories) if search_view_instance else []
+        if index in view_cache:
+            # Cached views keep their state across tab switches (sweeper
+            # results, compare folders, search filters).
+            main_content_container.content = view_cache[index]
+            if index == 0:
+                search_view_instance = view_cache[0]
+        elif index == 0:
+            # CLI-provided folders are applied exactly once on the first visit.
             search_view_instance = SearchView(
                 on_scan_start=run_scan,
                 language=current_language,
@@ -846,26 +966,30 @@ def main(page: ft.Page):
             if initial_cli_dirs:
                 search_view_instance.selected_directories = list(initial_cli_dirs)
                 initial_cli_dirs = []
-            elif previous_dirs:
-                search_view_instance.selected_directories = previous_dirs
+            view_cache[0] = search_view_instance
             if search_view_instance.selected_directories:
                 search_view_instance.update_folders_list()
             main_content_container.content = search_view_instance
         elif index == 1:
-            main_content_container.content = SweeperView(
-                language=current_language
+            view_cache[1] = SweeperView(
+                language=current_language,
+                trash_default=trash_default[0]
             )
+            main_content_container.content = view_cache[1]
         elif index == 2:
-            main_content_container.content = SampleSearchView(
+            view_cache[2] = SampleSearchView(
                 on_scan_start=run_sample_scan,
                 language=current_language
             )
+            main_content_container.content = view_cache[2]
         elif index == 3:
-            main_content_container.content = CompareView(
+            view_cache[3] = CompareView(
                 on_compare_start=run_compare,
                 language=current_language
             )
+            main_content_container.content = view_cache[3]
         elif index == 4:
+            # History and settings render live data — rebuilt on every visit.
             main_content_container.content = build_history_tab()
         elif index == 5:
             main_content_container.content = build_settings_tab()
@@ -932,7 +1056,7 @@ def main(page: ft.Page):
                         ),
                         ft.Column([
                             ft.Text("DUPLICATER", size=15, weight=ft.FontWeight.BOLD, color=theme["TEXT_PRIMARY"]),
-                            ft.Text("Pro Disk Optimizer", size=11, color=theme["TEXT_MUTED"]),
+                            ft.Text(f"Pro Disk Optimizer v{APP_VERSION}", size=11, color=theme["TEXT_MUTED"]),
                         ], spacing=1)
                     ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=ft.Padding.only(bottom=10, top=4, left=4, right=4)
@@ -970,7 +1094,7 @@ def main(page: ft.Page):
                         ),
                         ft.Container(expand=True),
                         ft.Container(
-                            content=ft.Text("v3.5", size=11, color=theme["TEXT_MUTED"], weight=ft.FontWeight.W_500),
+                            content=ft.Text(f"v{APP_VERSION}", size=11, color=theme["TEXT_MUTED"], weight=ft.FontWeight.W_500),
                             padding=ft.Padding.only(right=4)
                         )
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),

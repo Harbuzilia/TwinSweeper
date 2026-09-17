@@ -21,8 +21,11 @@ def make_info(path: str, size: int, modified: float = 1000.0) -> FileInfo:
 
 
 def make_view(groups, **kwargs) -> ResultsView:
-    """groups: {"key": [FileInfo, ...]} — the shape scan_directory() returns."""
-    return ResultsView(groups, on_back=lambda: None, on_delete=lambda *a, **k: None, **kwargs)
+    """groups: {"key": [FileInfo, ...]} — the shape scan_directory() returns.
+    Callbacks are overridable through kwargs."""
+    kwargs.setdefault("on_back", lambda: None)
+    kwargs.setdefault("on_delete", lambda *a, **k: None)
+    return ResultsView(groups, **kwargs)
 
 
 class TestProtectOriginals:
@@ -154,3 +157,48 @@ class TestGetSelectedEntries:
         view.selected_paths = {str(tmp_path / "not_in_results.bin")}
 
         assert view.get_selected_entries() == []
+
+
+class TestPhashNoPreselection:
+    """Round 2: similar photos are NOT byte-identical duplicates — pre-selecting
+    all-but-one for deletion invited a one-click loss of genuinely different
+    shots. Regular duplicate results keep the convenient pre-selection."""
+
+    def test_similar_photos_not_preselected(self, tmp_path):
+        g = [make_info(str(tmp_path / "p0.jpg"), 10),
+             make_info(str(tmp_path / "p1.jpg"), 10),
+             make_info(str(tmp_path / "p2.jpg"), 10)]
+        view = make_view({"Photo Group: 0": g}, allow_hardlink=False)
+        assert view.selected_paths == set()
+
+    def test_duplicates_still_preselected_by_default(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        assert view.selected_paths == {g[1].path}
+
+
+class TestOperationBusyGuard:
+    """Round 2: Delete/Hardlink buttons must be no-ops while their worker is
+    already running — a second click used to launch a second worker over the
+    same selection."""
+
+    def test_busy_blocks_delete(self, tmp_path):
+        calls = []
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, on_delete=lambda *a, **k: calls.append(a))
+        view.selected_paths = {g[1].path}
+        view._operation_busy = True
+        view.on_delete_clicked(None)
+        assert calls == []
+
+    def test_busy_blocks_hardlink(self, tmp_path):
+        calls = []
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, on_hardlink=lambda *a, **k: calls.append(a))
+        view.selected_paths = {g[1].path}
+        view._operation_busy = True
+        view.on_hardlink_clicked(None)
+        assert calls == []

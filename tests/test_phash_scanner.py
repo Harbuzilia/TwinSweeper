@@ -188,3 +188,43 @@ class TestScanSimilarImages:
         # but nothing else joins.
         assert len(results) == 1
         assert len(next(iter(results.values()))) == 3
+
+
+class TestDhashExifOrientation:
+    """Round 2: phone photos are stored sideways + an EXIF orientation tag,
+    while re-saved copies are physically rotated. Without exif_transpose the
+    same photo in both forms hashed apart — the main use case silently failed."""
+
+    def test_dhash_matches_exif_rotated_copy(self, tmp_path):
+        from PIL import Image
+
+        base = Image.new("L", (80, 50))
+        px = base.load()
+        for y in range(50):
+            for x in range(80):
+                px[x, y] = x * 255 // 79
+
+        base.rotate(-90, expand=True).save(str(tmp_path / "physical.jpg"))
+        exif = Image.Exif()
+        exif[274] = 6  # "stored sideways, rotate 90 CW to display"
+        base.save(str(tmp_path / "with_exif.jpg"), exif=exif)
+
+        h_stored = compute_dhash(str(tmp_path / "with_exif.jpg"))
+        h_rotated = compute_dhash(str(tmp_path / "physical.jpg"))
+        assert h_stored is not None
+        assert h_rotated is not None
+        assert h_stored == h_rotated
+
+
+class TestUnsupportedFormatsReported:
+    def test_unsupported_image_formats_are_reported(self, tmp_path):
+        make_gradient_image(tmp_path / "a.png")
+        make_gradient_image(tmp_path / "b.png")
+        (tmp_path / "iphone_photo.heic").write_bytes(b"\x00\x01 fake heic")
+
+        messages: list = []
+        scan_similar_images([str(tmp_path)], progress_callback=lambda m, p: messages.append(m))
+
+        # "0 groups found" on an iPhone library is not "no duplicates" — the
+        # skipped formats must at least be named.
+        assert any("unsupported" in m.lower() and ".heic" in m.lower() for m in messages)

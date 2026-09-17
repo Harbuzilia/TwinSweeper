@@ -12,7 +12,7 @@ from sweeper import (
 )
 
 
-def make_lnk(path, target, local_base_path_offset=0x1C, include_link_info=True):
+def make_lnk(path, target, local_base_path_offset=0x1C, include_link_info=True, encoding="utf-8"):
     """Hand-crafted minimal ShellLink (.lnk) binary per MS-SHLLINK layout.
 
     Header (0x4C bytes) + LinkInfo block with a local base path string.
@@ -26,7 +26,7 @@ def make_lnk(path, target, local_base_path_offset=0x1C, include_link_info=True):
 
     out = bytearray(header)
     if include_link_info:
-        target_bytes = target.encode("utf-8")
+        target_bytes = target.encode(encoding)
         link_info = bytearray(0x1C)  # header fields only; path goes right after
         link_info[0x10:0x14] = local_base_path_offset.to_bytes(4, "little")
         link_info[0x08:0x0C] = (1).to_bytes(4, "little")  # VolumeIDAndLocalBasePath
@@ -179,6 +179,15 @@ class TestShortcuts:
         target = tmp_path / "Файл Данные.txt"
         target.write_text("x")
         lnk = make_lnk(tmp_path / "юникод.lnk", str(target))
+        assert resolve_windows_shortcut_target(lnk) == str(target)
+
+    def test_ansi_encoded_target_decoded_via_mbcs(self, tmp_path):
+        """Round 2: real Windows writes LocalBasePath in the SYSTEM ANSI code
+        page — the hardcoded cp1251 fallback garbled targets on non-Russian
+        Windows and flagged working shortcuts as broken."""
+        target = tmp_path / "Цель Анси.txt"
+        target.write_text("x")
+        lnk = make_lnk(tmp_path / "ansi.lnk", str(target), encoding="mbcs")
         assert resolve_windows_shortcut_target(lnk) == str(target)
 
 

@@ -7,6 +7,7 @@ handlers. Starting the real GUI is out of scope.
 Data-safety: every file lives in the test's own tmp_path.
 """
 import os
+import threading
 import time
 
 import main
@@ -103,3 +104,59 @@ class TestBuildHardlinkLogPairs:
     def test_dedupes_succeeded_paths(self):
         groups_map = {"o.txt": [("d.txt", 1, 1.0)]}
         assert main.build_hardlink_log_pairs(groups_map, ["d.txt", "d.txt"]) == [("o.txt", "d.txt")]
+
+
+class TestHistoryConcurrency:
+    """Round 2: scan-history writes raced with worker journaling — unlocked
+    read-modify-save cycles dropped entries."""
+
+    def test_concurrent_appends_keep_all_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main, "HISTORY_FILE", str(tmp_path / "history.json"))
+
+        def worker(n):
+            main.add_to_history([f"d{n}"], 1, 1)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        history = main.load_history()
+        assert len(history) == 8
+        assert {h["folders"][0] for h in history} == {f"d{n}" for n in range(8)}
+
+
+class TestSettingsStore:
+    """Round 2: language/theme/trash-default persist across launches (they
+    used to reset to hardcoded values every start)."""
+
+    def test_defaults_when_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+        assert main.load_settings() == dict(main.DEFAULT_SETTINGS)
+
+    def test_save_and_reload_roundtrip(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(main, "SETTINGS_FILE", str(tmp_path / "settings.json"))
+        main.save_settings({"language": "en", "theme": "midnight_oled"})
+        settings = main.load_settings()
+        assert settings["language"] == "en"
+        assert settings["theme"] == "midnight_oled"
+        assert settings["trash_default"] is True  # untouched default survives
+
+    def test_corrupt_file_falls_back_to_defaults(self, monkeypatch, tmp_path):
+        p = tmp_path / "settings.json"
+        p.write_text("{ this is not json", encoding="utf-8")
+        monkeypatch.setattr(main, "SETTINGS_FILE", str(p))
+        assert main.load_settings() == dict(main.DEFAULT_SETTINGS)
+
+    def test_failed_atomic_save_keeps_previous_settings(self, monkeypatch, tmp_path):
+        p = tmp_path / "settings.json"
+        monkeypatch.setattr(main, "SETTINGS_FILE", str(p))
+        main.save_settings({"language": "en"})
+
+        def crash_replace(src, dst):
+            raise OSError("simulated crash mid-save")
+
+        monkeypatch.setattr("os.replace", crash_replace)
+        main.save_settings({"language": "ru"})  # swallowed + logged
+        assert main.load_settings()["language"] == "en"

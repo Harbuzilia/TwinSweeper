@@ -2,6 +2,7 @@ import os
 import struct
 from typing import List, Dict, Tuple, Optional, Callable
 from scanner import FileInfo, is_system_path
+from locales import get_text
 
 JUNK_EXTENSIONS = {".tmp", ".bak", ".old", ".dmp", ".log", ".gid", ".chk"}
 # desktop.ini is NOT junk (H4): it is a legitimate Windows folder-customization
@@ -33,7 +34,7 @@ def find_empty_directories(
 
             total_checked += 1
             if progress_callback and total_checked % 50 == 0:
-                progress_callback(f"Checked {total_checked} directories...")
+                progress_callback(get_text("sweep_checked_dirs").format(total_checked))
 
             # Don't delete the root search directories themselves
             if os.path.normpath(root).lower() == os.path.normpath(directory).lower():
@@ -72,7 +73,7 @@ def delete_empty_directories(folders: List[str]) -> Tuple[int, List[str]]:
             os.rmdir(folder)
             deleted_count += 1
         except Exception as ex:
-            errors.append(f"Failed to remove '{folder}': {ex}")
+            errors.append(get_text("sweep_remove_failed").format(folder, ex))
 
     return deleted_count, errors
 
@@ -115,11 +116,18 @@ def resolve_windows_shortcut_target(lnk_path: str) -> Optional[str]:
                 path_end = content.find(b'\x00', path_start)
                 if path_end != -1:
                     raw_path = content[path_start:path_end]
-                    # Try windows-1251 / utf-8
+                    # LocalBasePath is an ANSI string in the SYSTEM code page.
+                    # utf-8 first keeps non-conformant writers working; the
+                    # mbcs fallback replaces a hardcoded cp1251 that garbled
+                    # targets (and flagged working shortcuts as broken) on
+                    # non-Russian Windows.
                     try:
                         return raw_path.decode('utf-8')
                     except UnicodeDecodeError:
-                        return raw_path.decode('cp1251', errors='ignore')
+                        try:
+                            return raw_path.decode('mbcs')
+                        except (UnicodeDecodeError, LookupError):
+                            return raw_path.decode('cp1251', errors='ignore')
     except Exception:
         pass
     return None
@@ -144,7 +152,7 @@ def find_broken_shortcuts(
                 if filename.lower().endswith(".lnk"):
                     scanned += 1
                     if progress_callback and scanned % 10 == 0:
-                        progress_callback(f"Analyzed {scanned} shortcuts...")
+                        progress_callback(get_text("sweep_analyzed_shortcuts").format(scanned))
 
                     filepath = os.path.join(root, filename)
                     target = resolve_windows_shortcut_target(filepath)
@@ -181,7 +189,7 @@ def find_junk_files(
             for filename in filenames:
                 scanned += 1
                 if progress_callback and scanned % 100 == 0:
-                    progress_callback(f"Scanned {scanned} files for junk...")
+                    progress_callback(get_text("sweep_scanned_junk").format(scanned))
 
                 filepath = os.path.join(root, filename)
                 name_lower = filename.lower()

@@ -235,7 +235,7 @@ class CompareView(ft.Column):
                 get_stat_card(
                     title=get_text("overlap", self.language),
                     value=f"{overlap_pct:.1f}%",
-                    subtitle=f"{len(common)} / {total} files",
+                    subtitle=get_text("compare_files_count", self.language).format(len(common), total),
                     icon=ft.Icons.PIE_CHART_OUTLINE_ROUNDED,
                     icon_color=PRIMARY_COLOR
                 ),
@@ -299,7 +299,7 @@ class CompareView(ft.Column):
         if self.active_tab == "common":
             items = self.comparison_data["common"]
             if not items:
-                rows.append(ft.Text("No common files found.", color=TEXT_MUTED))
+                rows.append(ft.Text(get_text("compare_no_common", self.language), color=TEXT_MUTED))
             for item in items:
                 # Real compare_folders schema (H1): every common entry carries
                 # two FileInfo objects (file_a/file_b) plus similarity/newer/larger.
@@ -340,7 +340,7 @@ class CompareView(ft.Column):
         elif self.active_tab == "unique_a":
             items = self.comparison_data["unique_a"]
             if not items:
-                rows.append(ft.Text("No unique files in Folder A.", color=TEXT_MUTED))
+                rows.append(ft.Text(get_text("compare_no_unique_a", self.language), color=TEXT_MUTED))
             for f in items:
                 rows.append(
                     ft.Container(
@@ -362,7 +362,7 @@ class CompareView(ft.Column):
         elif self.active_tab == "unique_b":
             items = self.comparison_data["unique_b"]
             if not items:
-                rows.append(ft.Text("No unique files in Folder B.", color=TEXT_MUTED))
+                rows.append(ft.Text(get_text("compare_no_unique_b", self.language), color=TEXT_MUTED))
             for f in items:
                 rows.append(
                     ft.Container(

@@ -5,6 +5,7 @@ import logging
 from typing import Tuple, List, Dict
 
 from scanner import get_file_hash
+from locales import get_text
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +48,12 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     Returns (success, error_message, freed_bytes).
     """
     if not os.path.exists(source_original) or not os.path.isfile(source_original):
-        return False, f"Original file not found: {source_original}", 0
+        return False, get_text("hl_err_original_not_found").format(source_original), 0
     if not os.path.exists(target_duplicate) or not os.path.isfile(target_duplicate):
-        return False, f"Duplicate file not found: {target_duplicate}", 0
+        return False, get_text("hl_err_duplicate_not_found").format(target_duplicate), 0
 
     if os.path.normpath(source_original).lower() == os.path.normpath(target_duplicate).lower():
-        return False, "Source and target are the same file.", 0
+        return False, get_text("hl_err_same_file"), 0
 
     if not is_same_volume(source_original, target_duplicate):
         return False, f"Cannot hardlink across different disk volumes ({source_original} vs {target_duplicate}).", 0
@@ -74,11 +75,11 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     # and full SHA-256 must match — this protects visually-similar (but
     # different) photos selected for hardlinking by mistake.
     if src_size != dup_size:
-        return False, "Files differ in size — hardlink refused to prevent data loss.", 0
+        return False, get_text("hl_err_size_diff"), 0
     src_hash = get_file_hash(source_original)
     dup_hash = get_file_hash(target_duplicate)
     if not src_hash or not dup_hash or src_hash != dup_hash:
-        return False, "Files differ in content — hardlink refused to prevent data loss.", 0
+        return False, get_text("hl_err_content_diff"), 0
 
     temp_link = target_duplicate + f".tmp_hl_{os.getpid()}"
     backup = target_duplicate + f".tmp_hl_backup_{os.getpid()}"
@@ -91,7 +92,7 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
             try:
                 os.remove(stale)
             except OSError as ex:
-                return False, f"Cannot remove stale temp file '{stale}': {ex}", 0
+                return False, get_text("hl_err_stale_tmp").format(stale, ex), 0
 
     try:
         # Create hardlink at temporary path first
@@ -100,7 +101,7 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
                 res = _kernel32.CreateHardLinkW(temp_link, source_original, None)
                 if not res:
                     err = ctypes.get_last_error()
-                    return False, f"Windows CreateHardLinkW failed (Win32 error {err})", 0
+                    return False, get_text("hl_err_win32").format(err), 0
             else:  # pragma: no cover - fallback when ctypes is unavailable
                 os.link(source_original, temp_link)
         else:
@@ -130,7 +131,7 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
             os.remove(backup)
         except OSError as ex:
             logger.warning("Hardlink created but old copy could not be removed: %s (%s)", backup, ex)
-            return True, f"Hardlink created, but the old copy could not be removed: {backup}", 0
+            return True, get_text("hl_warn_backup_leftover").format(backup), 0
         return True, "", dup_size
     except Exception as ex:
         if os.path.exists(temp_link):
@@ -152,7 +153,7 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
 
     for original, duplicates in groups_to_link.items():
         if not os.path.exists(original):
-            errors.append(f"Original file missing: {original}")
+            errors.append(get_text("hl_err_original_missing").format(original))
             continue
 
         for dup in duplicates:
@@ -162,8 +163,8 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
                 freed_bytes += freed
                 succeeded_paths.append(dup)
                 if err:
-                    errors.append(f"Hardlinked '{os.path.basename(dup)}' with a warning: {err}")
+                    errors.append(get_text("hl_msg_linked_with_warning").format(os.path.basename(dup), err))
             else:
-                errors.append(f"Failed to hardlink '{os.path.basename(dup)}': {err}")
+                errors.append(get_text("hl_msg_failed").format(os.path.basename(dup), err))
 
     return success_count, freed_bytes, errors, succeeded_paths

@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
 
-    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru", allow_hardlink: bool = True):
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True):
         super().__init__()
         self.all_results = dict(results)
         self.filtered_results = dict(results)
@@ -32,6 +32,13 @@ class ResultsView(ft.Column):
         self.on_hardlink = on_hardlink
         self.language = language
         self.allow_hardlink = allow_hardlink
+        # Initial checkbox state for the delete dialog — comes from Settings
+        # ("move to Recycle Bin by default") instead of a hardcoded True.
+        self.trash_default = trash_default
+        # True while a delete/hardlink worker is running for this view — the
+        # action buttons are no-ops until it finishes (a second click used to
+        # launch a second worker over the same selection).
+        self._operation_busy = False
 
         # Global selection state
         self.selected_paths: Set[str] = set()
@@ -193,7 +200,11 @@ class ResultsView(ft.Column):
         self.operation_progress = ft.ProgressBar(value=0, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.operation_status = ft.Text("", size=12, color=TEXT_SECONDARY, visible=False)
 
-        self.select_default_duplicates()
+        # pHash results are visually SIMILAR photos, not byte-identical
+        # duplicates: pre-selecting everything but one for deletion invites a
+        # one-click loss of genuinely different shots.
+        if self.allow_hardlink:
+            self.select_default_duplicates()
         self.build_ui()
         self.refresh_filtered_results()
 
@@ -211,7 +222,12 @@ class ResultsView(ft.Column):
         )
 
         kpis = [
-            get_kpi_badge(ft.Icons.DELETE_SWEEP_ROUNDED, get_text("wasted_space", self.language), format_file_size(self.total_wasted_bytes), color=DANGER_COLOR),
+            get_kpi_badge(
+                ft.Icons.DELETE_SWEEP_ROUNDED,
+                get_text("similar_total_size" if not self.allow_hardlink else "wasted_space", self.language),
+                format_file_size(self.total_wasted_bytes),
+                color=DANGER_COLOR
+            ),
             get_kpi_badge(ft.Icons.FOLDER_ZIP_OUTLINED, get_text("duplicate_groups", self.language), str(self.total_groups), color=PRIMARY_COLOR),
             get_kpi_badge(ft.Icons.CONTENT_COPY_ROUNDED, get_text("duplicate_files_count", self.language), str(self.total_dupe_files), color=INFO_COLOR),
             get_kpi_badge(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, f"{get_text('kpi_selected', self.language)}:", f"{len(self.selected_paths)} ({format_file_size(selected_size)})", color=SUCCESS_COLOR),
@@ -474,7 +490,7 @@ class ResultsView(ft.Column):
             get_action_icon_button(
                 icon=ft.Icons.EXPAND_LESS_ROUNDED if not is_collapsed else ft.Icons.EXPAND_MORE_ROUNDED,
                 icon_color=TEXT_MUTED,
-                tooltip="Collapse / Expand",
+                tooltip=get_text("collapse_tooltip", self.language),
                 on_click=lambda _, k=key: self.toggle_group_collapse(k)
             )
         )
@@ -716,7 +732,7 @@ class ResultsView(ft.Column):
                 with Image.open(path) as im:
                     return f"{im.width} × {im.height} px"
             except Exception:
-                return "Unknown"
+                return get_text("unknown_size", self.language)
 
         dims_a = get_img_dims(file_a.path)
         dims_b = get_img_dims(file_b.path)
@@ -818,6 +834,8 @@ class ResultsView(ft.Column):
     def on_delete_clicked(self, e):
         if not self.selected_paths:
             return
+        if self._operation_busy:
+            return
 
         selected_list = list(self.selected_paths)
         system_files = [p for p in selected_list if is_system_path(p)]
@@ -842,12 +860,13 @@ class ResultsView(ft.Column):
                 self.update()
             except Exception:
                 pass
+            self._operation_busy = True
             self.on_delete(selected_entries, use_trash=use_trash)
 
         def cancel_dialog(e):
             self.page.pop_dialog()
 
-        trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=True)
+        trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=self.trash_default)
 
         content_controls = [
             ft.Text(get_text("delete_summary_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),
@@ -867,7 +886,7 @@ class ResultsView(ft.Column):
         if system_files:
             sys_summary = "\n".join([f"• {os.path.basename(f)}" for f in system_files[:4]])
             if len(system_files) > 4:
-                sys_summary += f"\n... (+{len(system_files) - 4} more)"
+                sys_summary += "\n" + get_text("more_items_suffix", self.language).format(len(system_files) - 4)
             content_controls.insert(0,
                 ft.Container(
                     content=ft.Text(get_text("system_delete_warning", self.language).format(sys_summary), color=DANGER_COLOR, size=12),
@@ -897,6 +916,8 @@ class ResultsView(ft.Column):
     def on_hardlink_clicked(self, e):
         if not self.selected_paths or not self.on_hardlink:
             return
+        if self._operation_busy:
+            return
 
         selected_list = list(self.selected_paths)
         total_size = sum(
@@ -914,6 +935,7 @@ class ResultsView(ft.Column):
                 self.update()
             except Exception:
                 pass
+            self._operation_busy = True
             groups_map = {}
             for files in self.all_results.values():
                 if not files:

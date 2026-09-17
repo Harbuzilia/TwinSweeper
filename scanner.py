@@ -7,6 +7,7 @@ from typing import List, Dict, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_cache import cache_db
+from locales import get_text
 
 try:
     import xxhash
@@ -206,12 +207,15 @@ def scan_directory(
         if not exclude_patterns:
             return False
         path_norm = os.path.normpath(path).lower()
-        base_name = os.path.basename(path_norm)
+        # Match WHOLE path components only — a "Temp" chip must not swallow
+        # D:\Templates or "attempt_final": substring matching silently shrank
+        # scan results without any warning.
+        components = path_norm.split(os.sep)
         for pattern in exclude_patterns:
             pat_lower = pattern.strip().lower()
             if not pat_lower:
                 continue
-            if fnmatch.fnmatch(path_norm, f"*{pat_lower}*") or fnmatch.fnmatch(base_name, pat_lower):
+            if any(fnmatch.fnmatch(component, pat_lower) for component in components):
                 return True
         return False
 
@@ -219,7 +223,7 @@ def scan_directory(
     total_found = 0
 
     # Phase 1: File discovery & size indexing
-    report_progress("Phase 1/3: Indexing files...", 0.0)
+    report_progress(get_text("scan_phase_indexing"), 0.0)
     for directory in directories:
         if is_cancelled():
             return {}
@@ -259,7 +263,7 @@ def scan_directory(
                     total_found += 1
 
                     if total_found % 200 == 0:
-                        report_progress(f"Indexed {total_found} files...", None)
+                        report_progress(get_text("scan_indexed").format(total_found), None)
                 except (OSError, PermissionError):
                     continue
 
@@ -292,7 +296,7 @@ def scan_directory(
         # Phase 2: Parallel hashing with SQLite Cache.
         # Skipped entirely for size/name-only scans — hashing every candidate there
         # is pure wasted I/O.
-        report_progress(f"Phase 2/3: Analyzing {total_candidates} candidate files...", 0.1)
+        report_progress(get_text("scan_phase_analyzing").format(total_candidates), 0.1)
 
         processed_count = 0
 
@@ -340,7 +344,7 @@ def scan_directory(
             processed_count += 1
             if processed_count % 50 == 0 or processed_count == total_candidates:
                 pct = 0.1 + (processed_count / total_candidates) * 0.7
-                report_progress(f"Hashed {processed_count}/{total_candidates} files...", pct)
+                report_progress(get_text("scan_hashed").format(processed_count, total_candidates), pct)
 
         if cancelled:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -368,7 +372,7 @@ def scan_directory(
 
     # Turbo verification with full SHA-256 for collision elimination
     if turbo_mode and by_hash and duplicates:
-        report_progress("Verifying full hashes for potential matches...", 0.85)
+        report_progress(get_text("scan_verifying_full"), 0.85)
         verified_grouped = defaultdict(list)
 
         for key, files in duplicates.items():
@@ -392,7 +396,7 @@ def scan_directory(
 
     # Phase 3: Byte-by-byte verification (if enabled)
     if by_byte and duplicates:
-        report_progress("Phase 3/3: Performing byte-by-byte verification...", 0.9)
+        report_progress(get_text("scan_phase_byte"), 0.9)
         final_duplicates = {}
         total_groups = len(duplicates)
 
@@ -417,7 +421,7 @@ def scan_directory(
                     sub_idx += 1
                 remaining = unmatched
 
-            report_progress(f"Byte verification {g_idx}/{total_groups}...", 0.9 + (g_idx / total_groups) * 0.1)
+            report_progress(get_text("scan_byte_progress").format(g_idx, total_groups), 0.9 + (g_idx / total_groups) * 0.1)
 
         duplicates = final_duplicates
 
@@ -427,7 +431,7 @@ def scan_directory(
     for files in duplicates.values():
         files.sort(key=lambda f: f.modified)
 
-    report_progress("Scan complete!", 1.0)
+    report_progress(get_text("scan_complete"), 1.0)
     return duplicates
 
 def scan_for_sample(
@@ -475,7 +479,7 @@ def scan_for_sample(
 
                 total_scanned += 1
                 if progress_callback and total_scanned % 100 == 0:
-                    progress_callback(f"Scanned {total_scanned} files...", None)
+                    progress_callback(get_text("sample_scanned").format(total_scanned), None)
 
                 try:
                     stat = os.stat(filepath)
@@ -582,7 +586,7 @@ def compare_folders(folder_a: str, folder_b: str, progress_callback: Optional[Ca
     for rel_path in all_keys:
         processed += 1
         if progress_callback and processed % 20 == 0:
-            progress_callback(f"Comparing {processed}/{total} files...")
+            progress_callback(get_text("compare_progress").format(processed, total))
 
         in_a = rel_path in files_a
         in_b = rel_path in files_b

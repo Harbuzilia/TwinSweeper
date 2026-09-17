@@ -506,3 +506,40 @@ class TestCancelDuringHash:
         )
         assert results == {}
         assert calls["n"] == 1
+
+
+class TestExcludePatternMatching:
+    """Round 2: exclude patterns must match WHOLE path components — the old
+    substring matching let a "Temp" chip swallow D:\\Templates and
+    "attempt_final", silently shrinking scan results."""
+
+    def test_pattern_matches_whole_components_only(self, tmp_path):
+        # NB: names deliberately unlike any ancestor of pytest's tmp_path
+        # (which lives under ...\Temp\... and a "Temp" chip would match it too).
+        for d in ("no", "notebook", "note_final"):
+            (tmp_path / d).mkdir()
+            (tmp_path / d / "dup.bin").write_bytes(b"Z" * 512)
+
+        results = scan_directory(
+            [str(tmp_path)], by_size=True, by_hash=True,
+            exclude_patterns=["No"], use_cache=False,
+        )
+        # Old behavior: substring "*no*" excluded all three dirs -> no group.
+        assert len(results) == 1
+        group = next(iter(results.values()))
+        parent_names = {os.path.basename(os.path.dirname(f.path)) for f in group}
+        assert parent_names == {"notebook", "note_final"}
+
+    def test_wildcard_pattern_matches_component_names(self, tmp_path):
+        (tmp_path / "keep.txt").write_bytes(b"A" * 100)
+        (tmp_path / "app.logger.txt").write_bytes(b"A" * 100)  # '*.log' must NOT match this
+        (tmp_path / "app.log").write_bytes(b"A" * 100)
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / "x.log").write_bytes(b"A" * 100)
+
+        results = scan_directory(
+            [str(tmp_path)], by_size=True, by_hash=True,
+            exclude_patterns=["*.log"], use_cache=False,
+        )
+        paths = {f.path for files in results.values() for f in files}
+        assert paths == {str(tmp_path / "keep.txt"), str(tmp_path / "app.logger.txt")}

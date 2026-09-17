@@ -2,12 +2,23 @@ import os
 import fnmatch
 from typing import List, Dict, Tuple, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image
+from PIL import Image, ImageOps
 
 from scanner import FileInfo
 from db_cache import cache_db
+from locales import get_text
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".ico"}
+# Formats PIL decodes out of the box. HEIC/RAW and friends need extra
+# plugins — they are counted and reported instead of silently ignored
+# (an iPhone library scanned with "0 groups found" is not "no duplicates").
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif",
+    ".tiff", ".tif", ".ico", ".tga", ".ppm", ".pgm", ".pbm", ".pcx",
+}
+UNSUPPORTED_IMAGE_EXTENSIONS = {
+    ".heic", ".heif", ".avif", ".cr2", ".nef", ".arw", ".dng",
+    ".raw", ".orf", ".rw2", ".srw", ".raf",
+}
 
 def compute_dhash(image_path: str, hash_size: int = 8) -> Optional[str]:
     """
@@ -16,6 +27,11 @@ def compute_dhash(image_path: str, hash_size: int = 8) -> Optional[str]:
     """
     try:
         with Image.open(image_path) as img:
+            # EXIF orientation: phone photos are stored "sideways" plus an
+            # orientation tag, while re-saved copies (messengers, editors) are
+            # physically rotated. Without transposing to the canonical
+            # orientation the same photo in both forms hashes apart.
+            img = ImageOps.exif_transpose(img)
             # Convert to grayscale and resize to (hash_size + 1, hash_size)
             img = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
             # tobytes() yields one byte per pixel for mode "L" without the
@@ -73,20 +89,21 @@ def scan_similar_images(
             progress_callback(msg, pct)
 
     def should_exclude(path: str) -> bool:
-        """Same matching rules as scanner.scan_directory: fnmatch on basename or path substring."""
+        """Same matching rules as scanner.scan_directory: whole path components."""
         if not exclude_patterns:
             return False
         path_norm = os.path.normpath(path).lower()
-        base_name = os.path.basename(path_norm)
+        components = path_norm.split(os.sep)
         for pattern in exclude_patterns:
             p = pattern.strip().lower()
-            if p and (fnmatch.fnmatch(base_name, p) or fnmatch.fnmatch(path_norm, f"*{p}*")):
+            if p and any(fnmatch.fnmatch(component, p) for component in components):
                 return True
         return False
 
     # 1. Discover all image files
-    report("Discovering image files...", 0.0)
+    report(get_text("phash_discovering"), 0.0)
     image_files: List[FileInfo] = []
+    skipped_unsupported: set = set()
 
     for directory in directories:
         if is_cancelled() or not os.path.exists(directory):
@@ -99,29 +116,37 @@ def scan_similar_images(
                 dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
             for filename in filenames:
                 ext = os.path.splitext(filename.lower())[1]
-                if ext in IMAGE_EXTENSIONS:
-                    filepath = os.path.join(root, filename)
-                    if should_exclude(filepath):
-                        continue
-                    try:
-                        stat = os.stat(filepath)
-                        if stat.st_size > 0:
-                            image_files.append(FileInfo(
-                                path=filepath,
-                                name=filename,
-                                size=stat.st_size,
-                                created=stat.st_ctime,
-                                modified=stat.st_mtime,
-                                category="images"
-                            ))
-                    except (OSError, PermissionError):
-                        continue
+                if ext not in IMAGE_EXTENSIONS:
+                    if ext in UNSUPPORTED_IMAGE_EXTENSIONS:
+                        skipped_unsupported.add(ext)
+                    continue
+                filepath = os.path.join(root, filename)
+                if should_exclude(filepath):
+                    continue
+                try:
+                    stat = os.stat(filepath)
+                    if stat.st_size > 0:
+                        image_files.append(FileInfo(
+                            path=filepath,
+                            name=filename,
+                            size=stat.st_size,
+                            created=stat.st_ctime,
+                            modified=stat.st_mtime,
+                            category="images"
+                        ))
+                except (OSError, PermissionError):
+                    continue
 
     total_images = len(image_files)
     if total_images < 2 or is_cancelled():
         return {}
 
-    report(f"Computing perceptual hashes for {total_images} photos...", 0.1)
+    if skipped_unsupported:
+        # Better an explicit "we skipped HEIC" than a silent "0 groups found"
+        # on an iPhone photo library.
+        report(get_text("phash_skipped_unsupported").format(', '.join(sorted(skipped_unsupported))), None)
+
+    report(get_text("phash_hashing").format(total_images), 0.1)
 
     # 2. Compute pHashes in parallel using SQLite Cache
     def get_or_calc_phash(info: FileInfo) -> Tuple[FileInfo, Optional[str]]:
@@ -161,7 +186,7 @@ def scan_similar_images(
         processed += 1
         if processed % 50 == 0 or processed == total_images:
             pct = 0.1 + (processed / total_images) * 0.6
-            report(f"Hashed {processed}/{total_images} photos...", pct)
+            report(get_text("phash_hashed").format(processed, total_images), pct)
 
     if cancelled:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -172,7 +197,7 @@ def scan_similar_images(
         return {}
 
     # 3. Cluster by Hamming Distance using Disjoint Set (Union-Find)
-    report("Clustering visually similar photos...", 0.75)
+    report(get_text("phash_clustering"), 0.75)
     max_hamming_dist = int(64 * (1.0 - similarity_threshold))
 
     parent = list(range(len(hashed_images)))

@@ -48,6 +48,7 @@ translations = {
         "please_select_dir": "Please select at least one folder to scan.",
         "error_no_criteria": "Select at least one comparison criterion (size, hash, name or bytes).",
         "compare_error": "Comparison failed: {0}",
+        "similar_total_size": "Similar photos size",
         "no_duplicates": "Great news! No duplicate files found in selected folders.",
 
         # Similar Photos Screen (pHash)
@@ -239,6 +240,53 @@ translations = {
         "remove_context_menu_btn": "Remove from Context Menu",
         "context_menu_added": "Successfully added 'Scan Duplicates with Duplicater' to Windows context menu.",
         "context_menu_removed": "Removed Duplicater from Windows context menu.",
+        "context_menu_action_title": "Scan Duplicates with Duplicater",
+
+        # Core-module progress & errors (round 2 i18n)
+        "scan_error": "Error: {0}",
+        "scan_phase_indexing": "Phase 1/3: Indexing files...",
+        "scan_indexed": "Indexed {0} files...",
+        "scan_phase_analyzing": "Phase 2/3: Analyzing {0} candidate files...",
+        "scan_hashed": "Hashed {0}/{1} files...",
+        "scan_verifying_full": "Verifying full hashes for potential matches...",
+        "scan_phase_byte": "Phase 3/3: Performing byte-by-byte verification...",
+        "scan_byte_progress": "Byte verification {0}/{1}...",
+        "scan_complete": "Scan complete!",
+        "sample_scanned": "Scanned {0} files...",
+        "compare_progress": "Comparing {0}/{1} files...",
+        "sweep_checked_dirs": "Checked {0} directories...",
+        "sweep_analyzed_shortcuts": "Analyzed {0} shortcuts...",
+        "sweep_scanned_junk": "Scanned {0} files for junk...",
+        "sweep_remove_failed": "Failed to remove '{0}': {1}",
+        "phash_discovering": "Discovering image files...",
+        "phash_hashing": "Computing perceptual hashes for {0} photos...",
+        "phash_hashed": "Hashed {0}/{1} photos...",
+        "phash_clustering": "Clustering visually similar photos...",
+        "phash_skipped_unsupported": "Note: skipped files in unsupported image formats: {0}",
+        "verify_failed_access": "file not accessible ({0})",
+        "verify_failed_size": "size changed ({0} -> {1} bytes)",
+        "verify_failed_mtime": "modified time changed since scan",
+        "dlg_errors_list": "Errors:",
+        "dlg_warnings_list": "Warnings/Errors:",
+        "hl_err_original_not_found": "Original file not found: {0}",
+        "hl_err_duplicate_not_found": "Duplicate file not found: {0}",
+        "hl_err_same_file": "Source and target are the same file.",
+        "hl_err_cross_volume": "Cannot hardlink across different disk volumes ({0} vs {1}).",
+        "hl_err_size_diff": "Files differ in size — hardlink refused to prevent data loss.",
+        "hl_err_content_diff": "Files differ in content — hardlink refused to prevent data loss.",
+        "hl_err_stale_tmp": "Cannot remove stale temp file '{0}': {1}",
+        "hl_err_win32": "Windows CreateHardLinkW failed (Win32 error {0})",
+        "hl_warn_backup_leftover": "Hardlink created, but the old copy could not be removed: {0}",
+        "hl_err_original_missing": "Original file missing: {0}",
+        "hl_msg_linked_with_warning": "Hardlinked '{0}' with a warning: {1}",
+        "hl_msg_failed": "Failed to hardlink '{0}': {1}",
+        "compare_no_common": "No common files found.",
+        "compare_no_unique_a": "No unique files in Folder A.",
+        "compare_no_unique_b": "No unique files in Folder B.",
+        "compare_files_count": "{0} / {1} files",
+        "collapse_tooltip": "Collapse / Expand",
+        "unknown_size": "Unknown",
+        "more_items_suffix": "... (+{0} more)",
     },
     "ru": {
         # General & Navigation
@@ -289,6 +337,7 @@ translations = {
         "please_select_dir": "Пожалуйста, выберите хотя бы одну папку.",
         "error_no_criteria": "Выберите хотя бы один критерий сравнения (размер, хэш, имя или байты).",
         "compare_error": "Ошибка сравнения: {0}",
+        "similar_total_size": "Объём похожих фото",
         "no_duplicates": "Отлично! В выбранных папках дубликатов не обнаружено.",
 
         # Similar Photos Screen (pHash)
@@ -480,9 +529,73 @@ translations = {
         "remove_context_menu_btn": "Удалить из контекстного меню",
         "context_menu_added": "Пункт 'Найти дубликаты в Duplicater' успешно добавлен в меню Проводника.",
         "context_menu_removed": "Пункт успешно удален из контекстного меню Windows.",
+        "context_menu_action_title": "Найти дубликаты в Duplicater",
+
+        # Прогресс и ошибки модулей ядра (i18n раунда 2)
+        "scan_error": "Ошибка: {0}",
+        "scan_phase_indexing": "Фаза 1/3: индексация файлов...",
+        "scan_indexed": "Проиндексировано файлов: {0}...",
+        "scan_phase_analyzing": "Фаза 2/3: анализ кандидатов: {0}...",
+        "scan_hashed": "Хэшировано {0}/{1} файлов...",
+        "scan_verifying_full": "Проверка полных хэшей для найденных совпадений...",
+        "scan_phase_byte": "Фаза 3/3: побайтовая проверка...",
+        "scan_byte_progress": "Побайтовая проверка {0}/{1}...",
+        "scan_complete": "Сканирование завершено!",
+        "sample_scanned": "Просканировано файлов: {0}...",
+        "compare_progress": "Сравнение файлов {0}/{1}...",
+        "sweep_checked_dirs": "Проверено папок: {0}...",
+        "sweep_analyzed_shortcuts": "Проверено ярлыков: {0}...",
+        "sweep_scanned_junk": "Проверено файлов на мусор: {0}...",
+        "sweep_remove_failed": "Не удалось удалить '{0}': {1}",
+        "phash_discovering": "Поиск файлов изображений...",
+        "phash_hashing": "Вычисление перцептивных хэшей для {0} фото...",
+        "phash_hashed": "Обработано {0}/{1} фото...",
+        "phash_clustering": "Группировка похожих фото...",
+        "phash_skipped_unsupported": "Внимание: пропущены файлы в неподдерживаемых форматах: {0}",
+        "verify_failed_access": "файл недоступен ({0})",
+        "verify_failed_size": "размер изменился ({0} -> {1} байт)",
+        "verify_failed_mtime": "время изменения с момента скана изменилось",
+        "dlg_errors_list": "Ошибки:",
+        "dlg_warnings_list": "Предупреждения/ошибки:",
+        "hl_err_original_not_found": "Исходный файл не найден: {0}",
+        "hl_err_duplicate_not_found": "Файл-дубликат не найден: {0}",
+        "hl_err_same_file": "Исходный и целевой файл — один и тот же.",
+        "hl_err_cross_volume": "Хардлинк между разными томами диска невозможен ({0} и {1}).",
+        "hl_err_size_diff": "Файлы различаются размером — хардлинк отменён во избежание потери данных.",
+        "hl_err_content_diff": "Файлы различаются содержимым — хардлинк отменён во избежание потери данных.",
+        "hl_err_stale_tmp": "Не удалось удалить остаточный временный файл '{0}': {1}",
+        "hl_err_win32": "Ошибка Windows CreateHardLinkW (код {0})",
+        "hl_warn_backup_leftover": "Хардлинк создан, но старую копию удалить не удалось: {0}",
+        "hl_err_original_missing": "Исходный файл отсутствует: {0}",
+        "hl_msg_linked_with_warning": "Хардлинк для '{0}' создан с предупреждением: {1}",
+        "hl_msg_failed": "Не удалось создать хардлинк для '{0}': {1}",
+        "compare_no_common": "Общие файлы не найдены.",
+        "compare_no_unique_a": "Уникальных файлов в папке A нет.",
+        "compare_no_unique_b": "Уникальных файлов в папке B нет.",
+        "compare_files_count": "{0} / {1} файлов",
+        "collapse_tooltip": "Свернуть / развернуть",
+        "unknown_size": "Неизвестно",
+        "more_items_suffix": "... (ещё {0})",
     }
 }
 
-def get_text(key: str, lang: str = "ru") -> str:
+# Language for core modules (scanner/sweeper/phash/hardlink) that call
+# get_text(key) without an explicit lang — main.py switches it with the UI.
+_current_lang = "en"
+
+
+def set_current_language(lang: str) -> None:
+    """Switch the language used by core modules' get_text() calls."""
+    global _current_lang
+    if lang in translations:
+        _current_lang = lang
+
+
+def get_text(key: str, lang: str = None) -> str:
+    """Translate *key*. Views pass their language explicitly; core modules
+    get whatever the UI last set via set_current_language (English until
+    then, so the test suite's expectations stay stable)."""
+    if lang is None:
+        lang = _current_lang
     lang_dict = translations.get(lang, translations.get("ru", {}))
     return lang_dict.get(key, translations["en"].get(key, key))

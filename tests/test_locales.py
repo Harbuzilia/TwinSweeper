@@ -4,7 +4,7 @@ import re
 import pytest
 
 import locales
-from locales import get_text, translations
+from locales import get_text, set_current_language, translations
 
 
 @pytest.fixture(scope="module")
@@ -60,8 +60,11 @@ class TestPlaceholderConsistency:
 
 
 class TestGetText:
-    def test_default_language_is_russian(self):
-        assert get_text("app_title") == translations["ru"]["app_title"]
+    def test_no_arg_get_text_uses_current_language(self):
+        # Round 2: the no-arg default follows set_current_language (English
+        # until the app says otherwise) — core modules rely on this for
+        # progress/error strings.
+        assert get_text("app_title") == translations["en"]["app_title"]
 
     def test_explicit_language(self):
         assert get_text("app_title", "en") == translations["en"]["app_title"]
@@ -74,3 +77,51 @@ class TestGetText:
 
     def test_unknown_key_in_unknown_language(self):
         assert get_text("totally_unknown_key_xyz", "fr") == "totally_unknown_key_xyz"
+
+
+class TestCoreModuleLanguage:
+    """Round 2: core modules (scanner/sweeper/phash/hardlink) call get_text()
+    without an explicit language; main.py switches it together with the UI
+    language. The default stays English so test expectations are stable."""
+
+    def test_default_is_english(self):
+        assert get_text("scan_cancelled") == "Scan was cancelled."
+
+    def test_set_current_language_switches_core_strings(self):
+        try:
+            set_current_language("ru")
+            assert get_text("scan_cancelled") == "Сканирование отменено пользователем."
+        finally:
+            set_current_language("en")
+
+    def test_explicit_lang_beats_current_language(self):
+        try:
+            set_current_language("ru")
+            assert get_text("scan_cancelled", "en") == "Scan was cancelled."
+        finally:
+            set_current_language("en")
+
+    def test_unknown_language_is_ignored(self):
+        set_current_language("klingon")
+        assert get_text("scan_cancelled") == "Scan was cancelled."
+
+    def test_round2_keys_exist_paired(self, en_keys, ru_keys):
+        expected = {
+            "scan_error", "scan_phase_indexing", "scan_indexed", "scan_phase_analyzing",
+            "scan_hashed", "scan_verifying_full", "scan_phase_byte", "scan_byte_progress",
+            "scan_complete", "sample_scanned", "compare_progress",
+            "sweep_checked_dirs", "sweep_analyzed_shortcuts", "sweep_scanned_junk",
+            "sweep_remove_failed",
+            "phash_discovering", "phash_hashing", "phash_hashed", "phash_clustering",
+            "phash_skipped_unsupported",
+            "verify_failed_access", "verify_failed_size", "verify_failed_mtime",
+            "dlg_errors_list", "dlg_warnings_list",
+            "hl_err_original_not_found", "hl_err_duplicate_not_found", "hl_err_same_file",
+            "hl_err_cross_volume", "hl_err_size_diff", "hl_err_content_diff",
+            "hl_err_stale_tmp", "hl_err_win32", "hl_warn_backup_leftover",
+            "hl_err_original_missing", "hl_msg_linked_with_warning", "hl_msg_failed",
+            "compare_no_common", "compare_no_unique_a", "compare_no_unique_b",
+            "compare_files_count", "collapse_tooltip", "unknown_size", "more_items_suffix",
+        }
+        assert expected <= en_keys
+        assert expected <= ru_keys

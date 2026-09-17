@@ -1,6 +1,7 @@
 """Tests for ops_log.py — operation journal, undo, trim, unique ids."""
 import os
 import shutil
+import threading
 
 import pytest
 
@@ -146,3 +147,41 @@ class TestUndoHardlink:
         assert os.path.exists(duplicate)
         with open(original, "rb") as f1, open(duplicate, "rb") as f2:
             assert f1.read() == f2.read()
+
+
+class TestOpsLogConcurrencyAndAtomicity:
+    """Round 2: the delete worker and the sweeper worker journal from different
+    threads — unlocked load-modify-save cycles silently dropped operations, and
+    a crash mid-write truncated the whole undo history."""
+
+    def test_concurrent_appends_never_lose_operations(self, isolated_ops_log):
+        def worker(n):
+            for i in range(5):
+                isolated_ops_log.append_operation("delete", [f"p{n}_{i}"], 0)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        ops = isolated_ops_log.load_operations()
+        assert len(ops) == 40
+        paths = {p for op in ops for p in op["paths"]}
+        assert len(paths) == 40
+
+    def test_crash_during_save_keeps_journal_intact(self, isolated_ops_log, monkeypatch):
+        first = isolated_ops_log.append_operation("delete", ["first"], 0)
+        assert len(isolated_ops_log.load_operations()) == 1
+
+        def crash_replace(src, dst):
+            raise OSError("simulated crash mid-save")
+
+        monkeypatch.setattr("os.replace", crash_replace)
+        # Atomic write (tmp + replace) means the failed save leaves the old
+        # journal untouched instead of truncating it.
+        isolated_ops_log.save_operations([{"id": "lost", "type": "delete", "paths": [], "freed_bytes": 0, "details": {}, "undone": False, "ts": 0.0}])
+
+        ops = isolated_ops_log.load_operations()
+        assert len(ops) == 1
+        assert ops[0]["id"] == first["id"]
