@@ -65,6 +65,37 @@ class TestFileHashCache:
         assert fresh_cache_db.get_file_hash(r"C:\f", 300, 2.0) == "NEW"
         assert fresh_cache_db.get_file_hash(r"C:\f", 100, 1.0) is None
 
+    def test_stale_full_hash_dropped_when_file_changed(self, fresh_cache_db):
+        """Round 3 CRITICAL: saving a turbo hash for a CHANGED file (new
+        size/mtime) must NOT keep the old full_hash alive — otherwise the
+        SHA-256 verification phase 'confirms' an edited file as a duplicate
+        of its own old content."""
+        fresh_cache_db.save_file_hash(r"C:\f", 100, 1.0, full_hash="OLDFULL")
+        # File changed; the scanner re-saves only the turbo hash.
+        fresh_cache_db.save_file_hash(r"C:\f", 200, 2.0, turbo_hash="NEWTURBO")
+        # Stale full hash must be gone under the new size/mtime...
+        assert fresh_cache_db.get_file_hash(r"C:\f", 200, 2.0, turbo=False) is None
+        # ...while the fresh turbo hash is present.
+        assert fresh_cache_db.get_file_hash(r"C:\f", 200, 2.0, turbo=True) == "NEWTURBO"
+
+    def test_stale_turbo_hash_dropped_when_file_changed(self, fresh_cache_db):
+        fresh_cache_db.save_file_hash(r"C:\f", 100, 1.0, turbo_hash="OLDTURBO")
+        fresh_cache_db.save_file_hash(r"C:\f", 200, 2.0, full_hash="NEWFULL")
+        assert fresh_cache_db.get_file_hash(r"C:\f", 200, 2.0, turbo=True) is None
+        assert fresh_cache_db.get_file_hash(r"C:\f", 200, 2.0, turbo=False) == "NEWFULL"
+
+    def test_full_hash_survives_when_size_mtime_unchanged(self, fresh_cache_db):
+        # Same size+mtime → the file is presumed unchanged → keep the hash.
+        fresh_cache_db.save_file_hash(r"C:\f", 100, 1.0, full_hash="FULL")
+        fresh_cache_db.save_file_hash(r"C:\f", 100, 1.0, turbo_hash="TURBO")
+        assert fresh_cache_db.get_file_hash(r"C:\f", 100, 1.0, turbo=False) == "FULL"
+
+    def test_turbo_lookup_never_returns_full_hash(self, fresh_cache_db):
+        # Mixing a 64-char full hash into 16-char turbo grouping keys would
+        # split identical files apart.
+        fresh_cache_db.save_file_hash(r"C:\f", 100, 1.0, full_hash="FULL64CHARS")
+        assert fresh_cache_db.get_file_hash(r"C:\f", 100, 1.0, turbo=True) is None
+
 
 class TestImagePhashCache:
     def test_save_and_get_phash_roundtrip(self, fresh_cache_db):

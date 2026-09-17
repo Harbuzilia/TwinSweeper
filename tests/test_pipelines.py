@@ -182,6 +182,10 @@ class TestPerformMovePipeline:
         entries = self._make_sources(tmp_path)
         dest = tmp_path / "dest"
 
+        # Force the cross-volume copy path (same-volume moves use an atomic
+        # os.replace and never call copy2).
+        monkeypatch.setattr(main, "is_same_volume", lambda a, b: False)
+
         def failing_copy2(src, dst, *a, **kw):
             raise OSError("simulated disk failure")
 
@@ -189,8 +193,96 @@ class TestPerformMovePipeline:
         state = main.perform_move(entries, str(dest))
 
         # The M7 pattern: source survives, no truncated destination file,
-        # no journal entry for the failed file.
+        # no journal entry for the failed file, and the reserved placeholder
+        # is cleaned up.
         assert state["moved_count"] == 0
         assert (tmp_path / "src" / "a.bin").read_bytes() == b"AAA"
         assert not any(dest.iterdir())
         assert isolated_ops_log.load_operations() == []
+
+    def test_source_removal_failure_after_copy_leaves_no_duplicate(self, tmp_path, monkeypatch, isolated_ops_log):
+        """Round 3: if the cross-volume copy succeeds but removing the source
+        fails (locked file), the copy must be removed too — otherwise an
+        invisible duplicate is left in the destination."""
+        entries = self._make_sources(tmp_path)
+        dest = tmp_path / "dest"
+        monkeypatch.setattr(main, "is_same_volume", lambda a, b: False)
+
+        real_remove = os.remove
+
+        def failing_remove(p):
+            # Let temp/placeholder cleanup pass, but fail on the SOURCE files.
+            if os.path.basename(p) in ("a.bin", "b.bin") and "src" in p:
+                raise OSError("source is locked")
+            return real_remove(p)
+
+        monkeypatch.setattr(main.os, "remove", failing_remove)
+        state = main.perform_move(entries, str(dest))
+
+        assert state["moved_count"] == 0
+        # Sources intact, and the copies were rolled back — no duplicates.
+        assert (tmp_path / "src" / "a.bin").read_bytes() == b"AAA"
+        assert not any(dest.iterdir())
+        assert isolated_ops_log.load_operations() == []
+
+    def test_cancel_midway_still_journals_moved(self, tmp_path, monkeypatch, isolated_ops_log):
+        """Round 3 A6: a cancel between chunks must NOT lose the journal for
+        files already moved — they have to stay undoable."""
+        monkeypatch.setattr(main, "PIPELINE_CHUNK", 1)
+        entries = self._make_sources(tmp_path)
+        extra = tmp_path / "src" / "c.bin"
+        extra.write_bytes(b"CCC")
+        entries.append(snap(str(extra)))
+        dest = tmp_path / "dest"
+        flag = [False]
+
+        def cancel_after_first(done, total):
+            if done >= 1:
+                flag[0] = True
+
+        state = main.perform_move(entries, str(dest), cancel_flag=flag, progress_callback=cancel_after_first)
+
+        assert state["moved_count"] >= 1
+        ops = isolated_ops_log.load_operations()
+        assert len(ops) == 1 and ops[0]["type"] == "move"
+        assert len(ops[0]["details"]["pairs"]) == state["moved_count"]
+
+
+class TestTrashAvailability:
+    def test_trash_unavailable_refuses_permanent_delete(self, tmp_path, monkeypatch, isolated_ops_log):
+        """Round 3 A4: 'delete to Recycle Bin' with send2trash missing must
+        NEVER silently fall back to a permanent os.remove (H5)."""
+        f = tmp_path / "important.bin"
+        f.write_bytes(b"DATA" * 10)
+        monkeypatch.setattr(main, "HAS_SEND2TRASH", False)
+
+        state = main.perform_delete([snap(str(f))], use_trash=True)
+
+        assert state["deleted_count"] == 0
+        assert f.exists()  # the file survives
+        assert state["errors"] and "NOT deleted" in state["errors"][0]
+        assert isolated_ops_log.load_operations() == []
+
+    def test_cancel_midway_still_journals_deleted(self, tmp_path, monkeypatch, isolated_ops_log):
+        """Round 3 A6: a cancel between chunks must NOT lose the journal for
+        files already deleted — undo must still work for them."""
+        monkeypatch.setattr(main, "PIPELINE_CHUNK", 1)
+        files = []
+        for i in range(3):
+            f = tmp_path / f"f{i}.bin"
+            f.write_bytes(b"X" * 10)
+            files.append(snap(str(f)))
+        flag = [False]
+        monkeypatch.setattr(main, "send2trash", os.remove)
+
+        def cancel_after_first(done, total):
+            if done >= 1:
+                flag[0] = True
+
+        state = main.perform_delete(files, use_trash=True, cancel_flag=flag, progress_callback=cancel_after_first)
+
+        assert state["deleted_count"] >= 1
+        # The already-deleted file MUST be journaled despite the cancel.
+        ops = isolated_ops_log.load_operations()
+        assert len(ops) == 1 and ops[0]["type"] == "delete"
+        assert len(ops[0]["paths"]) == state["deleted_count"]

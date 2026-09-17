@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
 
-    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True):
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True, content_verified: bool = True):
         super().__init__()
         self.all_results = dict(results)
         self.filtered_results = dict(results)
@@ -38,6 +38,11 @@ class ResultsView(ft.Column):
         self.on_move = on_move
         self.language = language
         self.allow_hardlink = allow_hardlink
+        # False when files were grouped by size/name only (content never
+        # compared) — such groups must NOT be preselected for deletion, and a
+        # warning banner is shown (round 3: a size-only scan preselected
+        # content-different files for one-click deletion).
+        self.content_verified = content_verified
         # Initial checkbox state for the delete dialog — comes from Settings
         # ("move to Recycle Bin by default") instead of a hardcoded True.
         self.trash_default = trash_default
@@ -226,10 +231,12 @@ class ResultsView(ft.Column):
         self.operation_progress = ft.ProgressBar(value=0, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.operation_status = ft.Text("", size=12, color=TEXT_SECONDARY, visible=False)
 
-        # pHash results are visually SIMILAR photos, not byte-identical
-        # duplicates: pre-selecting everything but one for deletion invites a
-        # one-click loss of genuinely different shots.
-        if self.allow_hardlink:
+        # Pre-select duplicates for deletion ONLY when the content was actually
+        # verified identical (hash/byte compare). pHash results are visually
+        # similar (not identical), and size/name-only scans never compared
+        # content at all — pre-selecting either invites a one-click loss of
+        # files that are not true duplicates (round 3).
+        if self.allow_hardlink and self.content_verified:
             self.select_default_duplicates()
         self.build_ui()
         self.refresh_filtered_results()
@@ -283,6 +290,18 @@ class ResultsView(ft.Column):
 
     def build_ui(self):
         theme = get_current_theme()
+        # Warning banner for size/name-only scans (content never compared).
+        self.unverified_banner = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=WARNING_COLOR, size=18),
+                ft.Text(get_text("unverified_content_warning", self.language), size=12, color=WARNING_COLOR, expand=True)
+            ], spacing=8),
+            bgcolor=f"{WARNING_COLOR}18",
+            border=ft.Border.all(1, f"{WARNING_COLOR}55"),
+            border_radius=8,
+            padding=10,
+            visible=not self.content_verified
+        )
         chips = []
         categories = ["all", "images", "videos", "audio", "documents", "archives", "code", "other"]
         for cat in categories:
@@ -334,6 +353,10 @@ class ResultsView(ft.Column):
                     )
                 ], spacing=8)
             ),
+
+            # Warning banner: shown when files were grouped by size/name only
+            # and their content was never compared (round 3).
+            self.unverified_banner,
 
             # Master KPI Status Strip
             self.build_master_kpi_strip(),

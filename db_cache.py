@@ -86,13 +86,23 @@ class ScanCacheDB:
             if row:
                 cached_size, cached_mtime, full_h, turbo_h = row
                 if cached_size == size and abs(cached_mtime - mtime) < 0.001:
-                    return turbo_h if (turbo and turbo_h) else full_h
+                    # A turbo lookup must never fall back to the full hash:
+                    # grouping keys would mix 16- and 64-char hashes and split
+                    # identical files apart (round 3).
+                    return turbo_h if turbo else full_h
         except Exception as ex:
             logger.debug("file hash cache lookup failed for %s: %s", path, ex)
         return None
 
     def save_file_hash(self, path: str, size: int, mtime: float, full_hash: Optional[str] = None, turbo_hash: Optional[str] = None):
-        """Save or update file hash in cache."""
+        """Save or update file hash in cache.
+
+        A cached hash is only valid for the (size, mtime) it was computed
+        with. When the row is updated for a CHANGED file and the new write
+        does not carry that hash type, the stale value is dropped — otherwise
+        the full-SHA-256 verification phase would "confirm" an edited file as
+        a duplicate of its own OLD content and preselect it for deletion
+        (round 3: the single most dangerous data-loss path found)."""
         try:
             conn = self._get_connection()
             with conn:
@@ -102,8 +112,18 @@ class ScanCacheDB:
                     ON CONFLICT(path) DO UPDATE SET
                         size = excluded.size,
                         mtime = excluded.mtime,
-                        full_hash = COALESCE(excluded.full_hash, file_hashes.full_hash),
-                        turbo_hash = COALESCE(excluded.turbo_hash, file_hashes.turbo_hash);
+                        full_hash = CASE
+                            WHEN excluded.full_hash IS NOT NULL THEN excluded.full_hash
+                            WHEN file_hashes.size != excluded.size
+                                 OR file_hashes.mtime != excluded.mtime THEN NULL
+                            ELSE file_hashes.full_hash
+                        END,
+                        turbo_hash = CASE
+                            WHEN excluded.turbo_hash IS NOT NULL THEN excluded.turbo_hash
+                            WHEN file_hashes.size != excluded.size
+                                 OR file_hashes.mtime != excluded.mtime THEN NULL
+                            ELSE file_hashes.turbo_hash
+                        END;
                 """, (path, size, mtime, full_hash, turbo_hash))
         except Exception as ex:
             logger.debug("file hash cache save failed for %s: %s", path, ex)

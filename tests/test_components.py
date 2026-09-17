@@ -9,6 +9,7 @@ from ui.components import (
     get_active_theme_key,
     get_current_theme,
     get_detected_drives,
+    get_styled_dialog,
     set_active_theme,
 )
 
@@ -91,3 +92,28 @@ class TestGetDetectedDrives:
         # Windows regardless of which drive hosts the OS.
         system_drive = os.environ.get("SystemDrive", "C:") + "\\"
         assert system_drive in get_detected_drives()
+
+
+class TestStyledDialog:
+    """Round 3 A7: two settings handlers ("Clear cache", "Context menu") called
+    get_styled_dialog with no content and crashed with a TypeError AFTER the
+    real work was done — content must be optional."""
+
+    def test_dialog_without_content_does_not_crash(self):
+        import flet as ft
+        dlg = get_styled_dialog(title="Cache cleared", actions=[])
+        assert isinstance(dlg, ft.AlertDialog)
+        assert dlg.content is not None  # an empty container, never None
+
+    def test_dialog_with_content_preserves_it(self):
+        import flet as ft
+        body = ft.Text("hello")
+        dlg = get_styled_dialog(title="t", content=body)
+        assert dlg.content is body
+
+    def test_dialog_with_width_wraps_content(self):
+        import flet as ft
+        body = ft.Text("hello")
+        dlg = get_styled_dialog(title="t", content=body, width=400)
+        assert isinstance(dlg.content, ft.Container)
+        assert dlg.content.content is body

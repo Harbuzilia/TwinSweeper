@@ -249,6 +249,39 @@ class TestScanDirectory:
         results = scan_directory([str(dup_tree)])
         assert results == {}
 
+    def test_edited_file_not_grouped_via_stale_cache(self, tmp_path):
+        """Round 3 CRITICAL regression — the user's exact fear.
+
+        A file edited IN PLACE (same total size, same first/last 64KB so the
+        turbo hash is unchanged, new mtime) must NOT be reported as a duplicate
+        of its own OLD content. Before the fix, saving the new turbo hash kept
+        the stale full_hash alive (COALESCE), so the SHA-256 verification phase
+        'confirmed' the edited file as a duplicate and preselected it for
+        deletion — destroying unique data.
+        """
+        block = 65536
+        head, tail = b"H" * block, b"T" * block
+        a = tmp_path / "a.bin"
+        b = tmp_path / "b.bin"
+        a.write_bytes(head + b"MID-VERSION-1" + tail)
+        b.write_bytes(head + b"MID-VERSION-1" + tail)  # identical to a v1
+
+        # Scan 1: a and b are genuine duplicates; both full hashes get cached.
+        first = scan_directory([str(tmp_path)], by_hash=True, turbo_mode=True, use_cache=True)
+        assert len(first) == 1 and len(next(iter(first.values()))) == 2
+
+        # Edit a's middle in place: same size, same head/tail (turbo hash
+        # unchanged), different content. Bump mtime so the cache notices.
+        a.write_bytes(head + b"MID-VERSION-2" + tail)
+        assert a.stat().st_size == b.stat().st_size  # size unchanged on purpose
+        future = time.time() + 10
+        os.utime(str(a), (future, future))
+
+        # Scan 2: a(v2) and b differ in the middle → full hashes differ →
+        # they must NOT be grouped. A stale cache would wrongly group them.
+        second = scan_directory([str(tmp_path)], by_hash=True, turbo_mode=True, use_cache=True)
+        assert second == {}
+
     def test_turbo_collision_split_by_full_hash(self, tmp_path):
         """Two files with identical first+last 64KB but different middle:
         turbo hash collides, full SHA-256 verification must split them."""
@@ -271,6 +304,75 @@ class TestScanDirectory:
         a.write_bytes(b"A" * block + b"MID-A" + b"A" * block)
         b.write_bytes(b"A" * block + b"MID-B" + b"A" * block)
         results = scan_directory([str(tmp_path)], by_byte=True)
+        assert results == {}
+
+
+class TestPhysicalFileDedup:
+    """Round 3: the same PHYSICAL file reachable by two paths (hardlink,
+    junction alias, overlapping scan roots) must never be reported as a
+    duplicate of itself — deleting the "duplicate" would destroy the
+    "original" it points to."""
+
+    def test_hardlink_alias_not_grouped_as_duplicate(self, tmp_path):
+        original = tmp_path / "original.bin"
+        original.write_bytes(b"SAME CONTENT" * 50)
+        alias = tmp_path / "alias.bin"
+        try:
+            os.link(str(original), str(alias))  # real NTFS hardlink
+        except (OSError, AttributeError):
+            pytest.skip("hardlinks unsupported on this filesystem")
+
+        results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False)
+
+        # One physical file → no duplicate group, even though two paths match.
+        assert results == {}
+
+    def test_recycle_bin_copy_not_indexed(self, tmp_path):
+        # A live file and its older copy in $Recycle.Bin: the bin copy must
+        # never become the "original" that marks the live file deletable.
+        live = tmp_path / "live.bin"
+        live.write_bytes(b"IMPORTANT" * 50)
+        bin_dir = tmp_path / "$Recycle.Bin" / "S-1-5-21"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "$R1A2B3C.bin").write_bytes(b"IMPORTANT" * 50)
+
+        results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False)
+
+        # The bin copy is pruned, so the live file has no duplicate to pair with.
+        assert results == {}
+
+    def test_system_volume_information_pruned(self, tmp_path):
+        live = tmp_path / "data.bin"
+        live.write_bytes(b"X" * 200)
+        svi = tmp_path / "System Volume Information"
+        svi.mkdir()
+        (svi / "shadow.bin").write_bytes(b"X" * 200)
+
+        results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False)
+        assert results == {}
+
+    def test_junction_to_external_dir_not_followed(self, tmp_path):
+        """A junction pointing OUTSIDE the scan root must not pull external
+        files into the results (and must not risk an infinite loop)."""
+        import subprocess
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "ext.bin").write_bytes(b"JUNCTION TARGET" * 20)
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "live.bin").write_bytes(b"JUNCTION TARGET" * 20)  # would pair via junction
+        link = root / "link"
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(external)],
+                check=True, capture_output=True, timeout=15,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pytest.skip("cannot create junction on this system")
+
+        results = scan_directory([str(root)], by_hash=True, use_cache=False)
+
+        # Junction pruned → only live.bin indexed → no duplicate group.
         assert results == {}
 
 
@@ -298,6 +400,25 @@ class TestScanForSample:
         sample, dst = self._sample_tree(tmp_path)
         found = scan_for_sample(str(sample), [str(tmp_path)])
         assert str(sample) not in {f.path for f in found}
+
+    def test_sample_hardlink_alias_excluded(self, tmp_path):
+        """Round 3: a hardlink/junction alias of the SAMPLE is the same
+        physical file — reporting it as a "copy" would let the user delete
+        the sample itself under another path."""
+        sample, dst = self._sample_tree(tmp_path)
+        alias = tmp_path / "sample_alias.bin"
+        try:
+            os.link(str(sample), str(alias))  # alias of the sample itself
+        except (OSError, AttributeError):
+            pytest.skip("hardlinks unsupported on this filesystem")
+
+        found = scan_for_sample(str(sample), [str(tmp_path)])
+        paths = {f.path for f in found}
+
+        assert str(sample) not in paths
+        assert str(alias) not in paths  # the sample's own alias is excluded
+        # The genuine content copies are still found.
+        assert str(dst / "copy.bin") in paths
 
     def test_by_name_restricts_matches(self, tmp_path):
         sample, dst = self._sample_tree(tmp_path)

@@ -178,6 +178,31 @@ class TestPhashNoPreselection:
         assert view.selected_paths == {g[1].path}
 
 
+class TestContentVerifiedGuard:
+    """Round 3 A5: a size/name-only scan never compared content, so its groups
+    must NOT be preselected for deletion (one click could erase content-different
+    files), and a warning banner must be shown."""
+
+    def test_unverified_scan_not_preselected(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, content_verified=False)
+        assert view.selected_paths == set()
+
+    def test_verified_scan_is_preselected(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, content_verified=True)
+        assert view.selected_paths == {g[1].path}
+
+    def test_warning_banner_visibility_follows_flag(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10)]
+        unverified = make_view({"k": g}, content_verified=False)
+        verified = make_view({"k": g}, content_verified=True)
+        assert unverified.unverified_banner.visible is True
+        assert verified.unverified_banner.visible is False
+
+
 class TestOperationBusyGuard:
     """Round 2: Delete/Hardlink buttons must be no-ops while their worker is
     already running — a second click used to launch a second worker over the

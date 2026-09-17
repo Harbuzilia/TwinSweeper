@@ -545,7 +545,7 @@ def get_action_icon_button(
 
 def get_styled_dialog(
     title: str,
-    content: ft.Control,
+    content: Optional[ft.Control] = None,
     actions: Optional[List[ft.Control]] = None,
     icon: Optional[str] = None,
     icon_color: Optional[str] = None,
@@ -574,9 +574,13 @@ def get_styled_dialog(
 
     title_widget = ft.Row(title_items, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-    wrapped_content = content
+    # content is optional: a title-only dialog (e.g. a confirmation toast)
+    # must not crash the caller — round 3 found two settings handlers passing
+    # no content and dying with a TypeError after the real work was done.
+    body = content if content is not None else ft.Container()
+    wrapped_content = body
     if width:
-        wrapped_content = ft.Container(content=content, width=width)
+        wrapped_content = ft.Container(content=body, width=width)
 
     return ft.AlertDialog(
         title=title_widget,

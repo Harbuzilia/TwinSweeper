@@ -166,6 +166,7 @@ translations = {
         "error_delete": "Failed to delete {}: {}",
         "error_verify_failed": "Skipped (file changed since scan) {}: {}",
         "trash_failed": "Could not move {} to Recycle Bin: {} — the file was NOT deleted.",
+        "trash_unavailable": "Recycle Bin is unavailable (Send2Trash not installed) — {} was NOT deleted. Uncheck 'to Recycle Bin' to delete permanently.",
         "delete_all_selected_warning": "⚠️ All files are selected in {} groups. The original (first) file of each such group will be kept automatically.",
         "deleting": "Deleting... {}/{} files",
         "hardlinking": "Hardlinking... {}/{} files",
@@ -262,6 +263,7 @@ translations = {
 
         # Core-module progress & errors (round 2 i18n)
         "scan_error": "Error: {0}",
+        "unverified_content_warning": "These files were grouped by SIZE/NAME only — their content was NOT compared. They may differ. Verify before deleting.",
         "scan_candidates_found": "Found {0} candidate groups ({1} files to analyze)...",
         "scan_eta_suffix": " ({0} files/s, ETA {1}s)",
         "no_match_filters": "No files match the current filters.",
@@ -476,6 +478,7 @@ translations = {
         "error_delete": "Ошибка удаления {}: {}",
         "error_verify_failed": "Пропущен (файл изменился после сканирования) {}: {}",
         "trash_failed": "Не удалось переместить в Корзину {}: {} — файл НЕ удалён.",
+        "trash_unavailable": "Корзина недоступна (Send2Trash не установлен) — {} НЕ удалён. Снимите флажок «в корзину», чтобы удалить навсегда.",
         "delete_all_selected_warning": "⚠️ В {} группах выделены ВСЕ файлы. Оригинал (первый файл) каждой такой группы будет автоматически сохранён.",
         "deleting": "Удаление... {}/{} файлов",
         "hardlinking": "Создание hardlink... {}/{} файлов",
@@ -572,6 +575,7 @@ translations = {
 
         # Прогресс и ошибки модулей ядра (i18n раунда 2)
         "scan_error": "Ошибка: {0}",
+        "unverified_content_warning": "Файлы сгруппированы ТОЛЬКО по размеру/имени — содержимое НЕ сравнивалось. Они могут различаться. Проверьте перед удалением.",
         "scan_candidates_found": "Найдено групп-кандидатов: {0} (файлов к анализу: {1})...",
         "scan_eta_suffix": " ({0} файл/с, осталось {1} с)",
         "no_match_filters": "Под текущие фильтры не подошёл ни один файл.",

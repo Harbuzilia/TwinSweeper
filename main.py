@@ -17,7 +17,7 @@ from scanner import (
     scan_directory, scan_for_sample, compare_folders, FileInfo, format_file_size, compute_wasted_bytes
 )
 from phash_scanner import scan_similar_images
-from hardlink_manager import batch_replace_with_hardlinks
+from hardlink_manager import batch_replace_with_hardlinks, is_same_volume
 from db_cache import cache_db
 from ops_log import load_operations, log_delete_operation, log_hardlink_operation, log_move_operation, undo_hardlink_operation, undo_move_operation, get_data_dir
 
@@ -214,17 +214,25 @@ def build_hardlink_log_pairs(
         if entry[0] in succeeded
     ]
 
-def _unique_destination(destination: str, source_path: str) -> str:
-    """A collision-free name for *source_path* inside *destination* — existing
-    files are never overwritten by a move."""
+def _reserve_destination(destination: str, source_path: str) -> str:
+    """Atomically reserve a collision-free destination path via O_CREAT|O_EXCL.
+
+    An existence-check-then-write has a TOCTOU window where a concurrent
+    process could create the file and os.replace would then silently overwrite
+    it. Reserving with O_EXCL closes that window. The call leaves an empty
+    placeholder that the caller overwrites on success or removes on failure."""
     name = os.path.basename(source_path)
-    candidate = os.path.join(destination, name)
     stem, ext = os.path.splitext(name)
+    candidate = os.path.join(destination, name)
     n = 1
-    while os.path.exists(candidate):
-        candidate = os.path.join(destination, f"{stem} ({n}){ext}")
-        n += 1
-    return candidate
+    while True:
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return candidate
+        except FileExistsError:
+            candidate = os.path.join(destination, f"{stem} ({n}){ext}")
+            n += 1
 
 # --- Operation pipelines (module-level: testable without the GUI) -----------
 # Every worker in main(page) is a thin UI shell around one of these: verify →
@@ -242,37 +250,47 @@ def perform_delete(file_entries: List[Tuple[str, int, float]], use_trash: bool, 
     total = len(file_entries)
     state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": []}
 
-    for start in range(0, total, PIPELINE_CHUNK):
-        if cancel_flag and cancel_flag[0]:
-            return state
-        for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
-            # C2: only delete the file that was actually scanned.
-            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-            if not ok:
-                state["errors"].append(get_text("error_verify_failed").format(path, reason))
-                continue
-            try:
-                if use_trash and HAS_SEND2TRASH:
-                    try:
-                        send2trash(path)
-                    except Exception as trash_ex:
-                        # H5: a failed move to the Recycle Bin must never
-                        # silently become an unrecoverable delete.
-                        state["errors"].append(get_text("trash_failed").format(path, trash_ex))
-                        continue
-                else:
-                    os.remove(path)
-                state["deleted_count"] += 1
-                state["total_freed"] += expected_size
-                state["actually_deleted"].append(path)
-            except Exception as ex:
-                state["errors"].append(get_text("error_delete").format(path, ex))
+    try:
+        for start in range(0, total, PIPELINE_CHUNK):
+            if cancel_flag and cancel_flag[0]:
+                return state
+            for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
+                # C2: only delete the file that was actually scanned.
+                ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+                if not ok:
+                    state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                    continue
+                try:
+                    if use_trash:
+                        if not HAS_SEND2TRASH:
+                            # The user asked for the Recycle Bin but the library
+                            # is unavailable — silently deleting forever would
+                            # break the core safety promise (H5). Refuse.
+                            state["errors"].append(get_text("trash_unavailable").format(path))
+                            continue
+                        try:
+                            send2trash(path)
+                        except Exception as trash_ex:
+                            # H5: a failed move to the Recycle Bin must never
+                            # silently become an unrecoverable delete.
+                            state["errors"].append(get_text("trash_failed").format(path, trash_ex))
+                            continue
+                    else:
+                        os.remove(path)
+                    state["deleted_count"] += 1
+                    state["total_freed"] += expected_size
+                    state["actually_deleted"].append(path)
+                except Exception as ex:
+                    state["errors"].append(get_text("error_delete").format(path, ex))
 
-        if progress_callback:
-            progress_callback(min(start + PIPELINE_CHUNK, total), total)
-
-    if state["actually_deleted"]:
-        log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+            if progress_callback:
+                progress_callback(min(start + PIPELINE_CHUNK, total), total)
+    finally:
+        # Journal even on a mid-operation cancel/early-return: files already
+        # deleted MUST stay recoverable via undo (round 3 — a cancel used to
+        # skip the journal, making those deletions permanent).
+        if state["actually_deleted"]:
+            log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
     return state
 
 def perform_hardlink(groups_map: Dict[str, List[Tuple[str, int, float]]], cancel_flag: List[bool] = None, progress_callback=None) -> dict:
@@ -287,42 +305,47 @@ def perform_hardlink(groups_map: Dict[str, List[Tuple[str, int, float]]], cancel
     items = [(orig, dup) for orig, dups in groups_map.items() for dup in dups]
     processed = 0
 
-    for start in range(0, len(items), PIPELINE_CHUNK):
-        if cancel_flag and cancel_flag[0]:
-            return state
-        chunk = items[start:start + PIPELINE_CHUNK]
-        chunk_map = {}
-        for orig, dup_entry in chunk:
-            path, expected_size, expected_mtime = dup_entry
-            # C2: only link the file that was actually scanned.
-            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-            if not ok:
-                state["errors"].append(get_text("error_verify_failed").format(path, reason))
-                continue
-            chunk_map.setdefault(orig, []).append(path)
-        if chunk_map:
-            sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
-            state["success_count"] += sc
-            state["freed_bytes"] += fb
-            state["errors"].extend(errs)
-            state["succeeded_paths"].extend(sp)
-        processed += len(chunk)
-        if progress_callback:
-            progress_callback(processed, total_dupes)
-
-    if state["succeeded_paths"]:
-        pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
-        if pairs:
-            log_hardlink_operation(pairs, state["freed_bytes"])
+    try:
+        for start in range(0, len(items), PIPELINE_CHUNK):
+            if cancel_flag and cancel_flag[0]:
+                return state
+            chunk = items[start:start + PIPELINE_CHUNK]
+            chunk_map = {}
+            for orig, dup_entry in chunk:
+                path, expected_size, expected_mtime = dup_entry
+                # C2: only link the file that was actually scanned.
+                ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+                if not ok:
+                    state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                    continue
+                chunk_map.setdefault(orig, []).append(path)
+            if chunk_map:
+                sc, fb, errs, sp = batch_replace_with_hardlinks(chunk_map)
+                state["success_count"] += sc
+                state["freed_bytes"] += fb
+                state["errors"].extend(errs)
+                state["succeeded_paths"].extend(sp)
+            processed += len(chunk)
+            if progress_callback:
+                progress_callback(processed, total_dupes)
+    finally:
+        # Journal even on a mid-operation cancel: links already created must
+        # stay undoable (round 3).
+        if state["succeeded_paths"]:
+            pairs = build_hardlink_log_pairs(groups_map, state["succeeded_paths"])
+            if pairs:
+                log_hardlink_operation(pairs, state["freed_bytes"])
     return state
 
 def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, cancel_flag: List[bool] = None, progress_callback=None) -> dict:
     """The move pipeline — the reversible alternative to deletion.
 
-    Per file: C2 re-verification, a collision-free destination name, copy to
-    a temp sibling + atomic os.replace, and only THEN the source is removed
-    (the M7 pattern: a crash leaves either the source or a complete copy,
-    never a truncated or half-missing file). Journaled for undo."""
+    Per file: C2 re-verification, an atomically reserved collision-free
+    destination name, then either an atomic same-volume rename (os.replace)
+    or a cross-volume copy-to-temp + replace. The source is dropped only once
+    the copy is fully in place; if dropping it fails, the copy is removed too
+    so we never leave an invisible duplicate. Journaled for undo (even on a
+    mid-operation cancel)."""
     total = len(file_entries)
     state = {"moved_count": 0, "actually_moved": [], "errors": [], "destination": destination}
     try:
@@ -331,36 +354,58 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
         state["errors"].append(get_text("error_move").format(destination, ex))
         return state
 
-    for start in range(0, total, PIPELINE_CHUNK):
-        if cancel_flag and cancel_flag[0]:
-            return state
-        for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
-            ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
-            if not ok:
-                state["errors"].append(get_text("error_verify_failed").format(path, reason))
-                continue
-            dest_path = _unique_destination(destination, path)
-            tmp_copy = dest_path + f".tmp_move_{os.getpid()}"
-            try:
-                shutil.copy2(path, tmp_copy)
-                os.replace(tmp_copy, dest_path)
-                # The source is only dropped once the copy is fully in place.
-                os.remove(path)
-                state["moved_count"] += 1
-                state["actually_moved"].append((path, dest_path))
-            except Exception as ex:
-                state["errors"].append(get_text("error_move").format(path, ex))
-                if os.path.exists(tmp_copy):
-                    try:
-                        os.remove(tmp_copy)
-                    except OSError:
-                        pass
+    try:
+        for start in range(0, total, PIPELINE_CHUNK):
+            if cancel_flag and cancel_flag[0]:
+                return state
+            for path, expected_size, expected_mtime in file_entries[start:start + PIPELINE_CHUNK]:
+                ok, reason = verify_file_unchanged(path, expected_size, expected_mtime)
+                if not ok:
+                    state["errors"].append(get_text("error_verify_failed").format(path, reason))
+                    continue
+                dest_path = _reserve_destination(destination, path)
+                try:
+                    if is_same_volume(path, destination):
+                        # Same volume: atomic rename, no copy window at all.
+                        os.replace(path, dest_path)
+                    else:
+                        tmp_copy = dest_path + f".tmp_move_{os.getpid()}"
+                        try:
+                            shutil.copy2(path, tmp_copy)
+                            os.replace(tmp_copy, dest_path)
+                        finally:
+                            if os.path.exists(tmp_copy):
+                                try:
+                                    os.remove(tmp_copy)
+                                except OSError:
+                                    pass
+                        # The copy is in place; now drop the source. If that
+                        # fails (locked file), remove the copy — never leave an
+                        # invisible duplicate behind.
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            try:
+                                os.remove(dest_path)
+                            except OSError:
+                                pass
+                            raise
+                    state["moved_count"] += 1
+                    state["actually_moved"].append((path, dest_path))
+                except Exception as ex:
+                    state["errors"].append(get_text("error_move").format(path, ex))
+                    # Remove the reserved placeholder (or any partial) on failure.
+                    if os.path.exists(dest_path):
+                        try:
+                            os.remove(dest_path)
+                        except OSError:
+                            pass
 
-        if progress_callback:
-            progress_callback(min(start + PIPELINE_CHUNK, total), total)
-
-    if state["actually_moved"]:
-        log_move_operation(state["actually_moved"], destination)
+            if progress_callback:
+                progress_callback(min(start + PIPELINE_CHUNK, total), total)
+    finally:
+        if state["actually_moved"]:
+            log_move_operation(state["actually_moved"], destination)
     return state
 
 def main(page: ft.Page):
@@ -526,7 +571,13 @@ def main(page: ft.Page):
                 total_dupes = sum(max(0, len(files) - 1) for files in results.values())
                 total_wasted = compute_wasted_bytes(results)
                 add_to_history(directories, total_dupes, total_wasted)
-                show_results_screen(results, allow_hardlink=not is_phash)
+                # Content is only verified identical when hashing/byte-compare
+                # ran; pHash results are perceptually similar, not identical.
+                show_results_screen(
+                    results,
+                    allow_hardlink=not is_phash,
+                    content_verified=(not is_phash) and (by_hash or by_byte)
+                )
 
         # page.run_thread keeps the flet page context in the worker — the
         # ResultsView FilePicker constructed there then auto-registers (H3).
@@ -584,7 +635,7 @@ def main(page: ft.Page):
                     s_stat = os.stat(sample_path)
                     sample_info = FileInfo(sample_path, os.path.basename(sample_path), s_stat.st_size, s_stat.st_ctime, s_stat.st_mtime)
                     results = {f"Sample: {sample_info.name}": [sample_info] + found_files}
-                    show_results_screen(results)
+                    show_results_screen(results, content_verified=(by_hash or by_byte))
                 except OSError:
                     progress_callback(get_text("no_duplicates", current_language), None)
             else:
@@ -615,7 +666,7 @@ def main(page: ft.Page):
         page.run_thread(_worker)
 
     # View Transition Handlers
-    def show_results_screen(results: Dict[str, List[FileInfo]], allow_hardlink: bool = True):
+    def show_results_screen(results: Dict[str, List[FileInfo]], allow_hardlink: bool = True, content_verified: bool = True):
         nonlocal results_view_instance
         def on_back():
             showing_results[0] = False
@@ -631,7 +682,8 @@ def main(page: ft.Page):
             on_move=move_files_handler,
             language=current_language,
             allow_hardlink=allow_hardlink,
-            trash_default=trash_default[0]
+            trash_default=trash_default[0],
+            content_verified=content_verified
         )
         showing_results[0] = True
         main_content_container.content = results_view_instance
