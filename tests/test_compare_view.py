@@ -61,3 +61,38 @@ class TestTabReset:
         view.show_results({"unique_a": [], "unique_b": [], "common": [], "total_files": 0})
 
         assert view.active_tab == "common"
+
+
+class TestCompareBusyGuard:
+    """Round 3: a double click on Compare used to launch two parallel
+    compare_folders workers whose results interleaved."""
+
+    def test_double_start_blocked_while_busy(self, tmp_path):
+        calls = []
+
+        def fake_start(a, b, result_cb, progress_cb, error_cb=None):
+            calls.append((a, b))
+
+        view = CompareView(on_compare_start=fake_start, language="ru")
+        view.folder_a = str(tmp_path)
+        view.folder_b = str(tmp_path)
+
+        view.start_compare(None)
+        view.start_compare(None)  # second click while the first is "running"
+
+        assert len(calls) == 1  # only one worker launched
+        assert view._compare_busy is True
+        assert view.compare_button.visible is False
+
+    def test_busy_cleared_after_results(self, tmp_path, monkeypatch):
+        view = make_compare_view()
+        view.folder_a = str(tmp_path)
+        view.folder_b = str(tmp_path)
+        monkeypatch.setattr(type(view), "parent", property(lambda self: ft.Container()))
+        view._compare_busy = True
+        view.compare_button.visible = False
+
+        view.show_results({"unique_a": [], "unique_b": [], "common": [], "total_files": 0})
+
+        assert view._compare_busy is False
+        assert view.compare_button.visible is True

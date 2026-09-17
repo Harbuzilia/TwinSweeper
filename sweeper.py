@@ -116,18 +116,28 @@ def resolve_windows_shortcut_target(lnk_path: str) -> Optional[str]:
                 path_end = content.find(b'\x00', path_start)
                 if path_end != -1:
                     raw_path = content[path_start:path_end]
-                    # LocalBasePath is an ANSI string in the SYSTEM code page.
-                    # utf-8 first keeps non-conformant writers working; the
-                    # mbcs fallback replaces a hardcoded cp1251 that garbled
-                    # targets (and flagged working shortcuts as broken) on
-                    # non-Russian Windows.
-                    try:
-                        return raw_path.decode('utf-8')
-                    except UnicodeDecodeError:
+                    # LocalBasePath is an ANSI string in the SYSTEM code page,
+                    # but some writers use UTF-8. A cp1251 string can accidentally
+                    # form valid UTF-8 and decode to garbage — which would mark a
+                    # WORKING shortcut as broken and offer it for deletion. Try the
+                    # candidates and prefer the one whose path actually exists;
+                    # otherwise fall back to the system ANSI page (mbcs). Never use
+                    # a lossy errors='ignore' decode that fabricates a path from
+                    # random bytes (round 3).
+                    candidates = []
+                    for enc in ('mbcs', 'utf-8'):
                         try:
-                            return raw_path.decode('mbcs')
+                            candidates.append(raw_path.decode(enc))
                         except (UnicodeDecodeError, LookupError):
-                            return raw_path.decode('cp1251', errors='ignore')
+                            continue
+                    if not candidates:
+                        return None
+                    for cand in candidates:
+                        if os.path.exists(cand):
+                            return cand
+                    # None exists (genuinely broken, or offline/removable target):
+                    # mbcs (system ANSI) is the best guess — first candidate.
+                    return candidates[0]
     except Exception:
         pass
     return None
@@ -157,6 +167,12 @@ def find_broken_shortcuts(
                     filepath = os.path.join(root, filename)
                     target = resolve_windows_shortcut_target(filepath)
                     if target and not os.path.exists(target):
+                        # A target on a disconnected drive / offline network share
+                        # is NOT a broken shortcut — deleting the .lnk would lose a
+                        # working link the user still needs (round 3).
+                        drive, _ = os.path.splitdrive(target)
+                        if drive and not os.path.exists(drive + os.sep):
+                            continue
                         try:
                             stat = os.stat(filepath)
                             broken.append({

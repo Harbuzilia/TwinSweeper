@@ -203,6 +203,21 @@ class TestContentVerifiedGuard:
         assert verified.unverified_banner.visible is False
 
 
+class TestZeroByteNoPreselect:
+    """Round 3: 0-byte 'duplicates' (__init.py, .gitkeep, lock files) free
+    nothing and their mass removal breaks projects — never pre-select them."""
+
+    def test_zero_byte_group_not_preselected(self, tmp_path):
+        g = [make_info(str(tmp_path / "e0"), 0), make_info(str(tmp_path / "e1"), 0)]
+        view = make_view({"k": g})
+        assert view.selected_paths == set()
+
+    def test_nonzero_group_still_preselected(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10), make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        assert view.selected_paths == {g[1].path}
+
+
 class TestOperationBusyGuard:
     """Round 2: Delete/Hardlink buttons must be no-ops while their worker is
     already running — a second click used to launch a second worker over the

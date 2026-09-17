@@ -264,3 +264,61 @@ class TestSweeperC2Verification:
 
         assert not junk.exists()
         assert view.junk_files_list == []
+
+
+class TestJunkPreselectPolicy:
+    """Round 3: backups/dumps and large files are often deliberate user data —
+    they are listed but NOT pre-checked, so a one-click 'Clean' cannot sweep
+    them away."""
+
+    @staticmethod
+    def _scan(view, tmp_path, monkeypatch):
+        view.active_mode = "junk_files"  # default is empty_folders
+        view.selected_directories = [str(tmp_path)]
+        monkeypatch.setattr(sweeper_view_module.threading, "Thread", _SyncThread)
+        monkeypatch.setattr(SweeperView, "_page_or_none", lambda self: FakePage())
+        monkeypatch.setattr(SweeperView, "update", lambda self: None)
+        view.start_sweep_scan(None)
+
+    def test_backup_extensions_not_preselected(self, tmp_path, monkeypatch):
+        (tmp_path / "a.tmp").write_bytes(b"x" * 10)
+        (tmp_path / "b.bak").write_bytes(b"x" * 10)
+        (tmp_path / "c.dmp").write_bytes(b"x" * 10)
+        (tmp_path / "d.old").write_bytes(b"x" * 10)
+        view = SweeperView(language="ru")
+        self._scan(view, tmp_path, monkeypatch)
+
+        # All four are listed as junk...
+        assert len(view.junk_files_list) == 4
+        # ...but only the unambiguous .tmp is pre-checked.
+        assert any(p.endswith("a.tmp") for p in view.selected_items)
+        assert not any(p.endswith((".bak", ".dmp", ".old")) for p in view.selected_items)
+
+    def test_large_files_not_preselected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sweeper_view_module, "_JUNK_PRESELECT_MAX_BYTES", 50)
+        (tmp_path / "small.tmp").write_bytes(b"x" * 10)
+        (tmp_path / "big.tmp").write_bytes(b"x" * 100)
+        view = SweeperView(language="ru")
+        self._scan(view, tmp_path, monkeypatch)
+
+        assert any(p.endswith("small.tmp") for p in view.selected_items)
+        assert not any(p.endswith("big.tmp") for p in view.selected_items)
+
+
+class TestSetModeGuard:
+    def test_set_mode_blocked_during_scan(self, tmp_path):
+        """Round 3: switching mode mid-scan would make the worker render results
+        for a different mode than it collected (and could feed folder paths to a
+        file-mode clean)."""
+        view, _ = make_junk_view(tmp_path)
+        view._scan_busy = True
+        view.active_mode = "junk_files"
+        view.set_mode("empty_folders")
+        assert view.active_mode == "junk_files"  # unchanged while busy
+
+    def test_set_mode_allowed_when_idle(self, tmp_path):
+        view, _ = make_junk_view(tmp_path)
+        view._scan_busy = False
+        view.active_mode = "junk_files"
+        view.set_mode("empty_folders")
+        assert view.active_mode == "empty_folders"

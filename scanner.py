@@ -237,6 +237,14 @@ def scan_directory(
             pat_lower = pattern.strip().lower()
             if not pat_lower:
                 continue
+            # A pattern containing a separator ("D:\Games", "temp\cache") is a
+            # path, not a single component — match it as a normalized prefix
+            # instead of silently ignoring it (round 3).
+            if os.sep in pat_lower or (os.altsep and os.altsep in pat_lower) or pat_lower.endswith(":"):
+                pat_path = os.path.normpath(pat_lower)
+                if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
+                    return True
+                continue
             if any(fnmatch.fnmatch(component, pat_lower) for component in components):
                 return True
         return False

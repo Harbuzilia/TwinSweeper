@@ -21,6 +21,12 @@ try:
 except ImportError:
     HAS_SEND2TRASH = False
 
+# Junk pre-selection policy (round 3): backup/dump extensions and large files
+# are often deliberate user data (DB dumps, game saves, app backups). They are
+# listed but NOT pre-checked, so a one-click "Clean" cannot sweep them away.
+_JUNK_NO_PRESELECT_EXT = {".bak", ".dmp", ".old"}
+_JUNK_PRESELECT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
+
 class SweeperView(ft.Column):
     ITEMS_PER_PAGE = 50
 
@@ -223,6 +229,11 @@ class SweeperView(ft.Column):
             pass
 
     def set_mode(self, mode: str):
+        # Switching mode mid-scan would make the worker's finally-block render
+        # results for a different mode than it collected (and could even feed
+        # folder paths to a file-mode clean). Ignore until the scan finishes.
+        if self._scan_busy:
+            return
         self.active_mode = mode
         self.clean_button.visible = False
         self.results_column.controls.clear()
@@ -271,8 +282,14 @@ class SweeperView(ft.Column):
                 else:
                     res = find_junk_files(self.selected_directories, cancel_flag=self.cancel_flag)
                     self.junk_files_list = res
-                    self.selected_items = set(r.path for r in res)
                     self._scan_snapshots = {r.path: (r.size, r.modified) for r in res}
+                    # Pre-select only unambiguous junk; backups/dumps and large
+                    # files stay unchecked (see _JUNK_NO_PRESELECT_EXT).
+                    self.selected_items = {
+                        r.path for r in res
+                        if r.size <= _JUNK_PRESELECT_MAX_BYTES
+                        and os.path.splitext(r.path)[1].lower() not in _JUNK_NO_PRESELECT_EXT
+                    }
             finally:
                 self._scan_busy = False
                 self.render_sweep_results()

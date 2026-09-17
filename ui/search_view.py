@@ -20,6 +20,9 @@ class SearchView(ft.Column):
         self.spacing = 16
 
         self.active_preset = "turbo"
+        # Run-generation counter: guards against a cancelled scan's late
+        # callbacks overwriting a newly started scan's UI (round 3).
+        self._run_gen = 0
 
         # File Picker
         self.pick_dir_dialog = ft.FilePicker()
@@ -378,7 +381,7 @@ class SearchView(ft.Column):
             self.progress_text.value = get_text("please_select_dir", self.language)
             self.progress_text.color = DANGER_COLOR
             self.status_icon.visible = True
-            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.icon = ft.Icons.ERROR_OUTLINE_ROUNDED
             self.status_icon.color = DANGER_COLOR
             self.update()
             return
@@ -392,10 +395,26 @@ class SearchView(ft.Column):
             self.progress_text.value = get_text("error_no_criteria", self.language)
             self.progress_text.color = DANGER_COLOR
             self.status_icon.visible = True
-            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.icon = ft.Icons.ERROR_OUTLINE_ROUNDED
             self.status_icon.color = DANGER_COLOR
             self.update()
             return
+
+        # Validate min-size BEFORE touching button visibility, so an invalid
+        # value can be flagged without leaving the UI stuck in "scanning".
+        min_size_bytes = 0
+        if self.min_size_field.value:
+            try:
+                min_size_bytes = int(self.min_size_field.value) * 1024
+                self.min_size_field.error_text = None
+                self.min_size_field.border_color = BORDER_COLOR
+            except ValueError:
+                # An invalid min-size must be visible, not silently treated as 0
+                # (which quietly disabled the filter).
+                self.min_size_field.error_text = get_text("error_invalid_number", self.language)
+                self.min_size_field.border_color = DANGER_COLOR
+                self.update()
+                return
 
         self.start_button.visible = False
         self.cancel_button.visible = True
@@ -404,7 +423,7 @@ class SearchView(ft.Column):
         self.progress_text.value = get_text("scanning", self.language)
         self.progress_text.color = TEXT_SECONDARY
         self.status_icon.visible = True
-        self.status_icon.name = ft.Icons.HOURGLASS_TOP_ROUNDED
+        self.status_icon.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self.status_icon.color = PRIMARY_COLOR
         self.update()
 
@@ -415,15 +434,23 @@ class SearchView(ft.Column):
         if self.exclude_field.value:
             exclude_patterns = [p.strip() for p in self.exclude_field.value.split(',') if p.strip()]
 
-        min_size_bytes = 0
-        try:
-            if self.min_size_field.value:
-                min_size_bytes = int(self.min_size_field.value) * 1024
-        except ValueError:
-            min_size_bytes = 0
-
         is_phash = (self.active_preset == "phash")
         phash_threshold = (self.similarity_slider.value / 100.0) if is_phash else 0.90
+
+        # Run-generation guard: if the user cancels and immediately starts a new
+        # scan, the OLD worker's late callbacks must not overwrite the new
+        # scan's UI (round 3 — a stale "cancelled" message reset the buttons
+        # mid-scan and allowed a third parallel scan).
+        self._run_gen += 1
+        gen = self._run_gen
+
+        def guarded_status(message, percent=None):
+            if gen == self._run_gen:
+                self.update_status(message, percent)
+
+        def guarded_finished():
+            if gen == self._run_gen:
+                self.on_scan_finished()
 
         self.on_scan_start(
             directories=self.selected_directories,
@@ -431,13 +458,13 @@ class SearchView(ft.Column):
             by_size=self.check_size.value,
             by_hash=self.check_hash.value,
             by_byte=self.check_byte.value,
-            progress_callback=self.update_status,
+            progress_callback=guarded_status,
             on_cancel_setup=setup_cancel,
             exclude_patterns=exclude_patterns,
             turbo_mode=self.check_turbo.value,
             min_size_bytes=min_size_bytes,
             ignore_empty_files=self.check_ignore_empty.value,
-            on_scan_finished=self.on_scan_finished,
+            on_scan_finished=guarded_finished,
             is_phash=is_phash,
             phash_threshold=phash_threshold
         )

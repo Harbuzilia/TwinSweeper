@@ -9,6 +9,7 @@ regenerates its preview.
 
 import hashlib
 import os
+import uuid
 
 from PIL import Image, ImageOps
 
@@ -38,9 +39,20 @@ def get_cached_thumbnail(path: str, mtime: float = None) -> str:
             img.thumbnail((THUMB_SIZE, THUMB_SIZE))
             img = img.convert("RGB")
             os.makedirs(THUMBS_DIR, exist_ok=True)
-            tmp_path = thumb_path + ".tmp"
-            img.save(tmp_path, "JPEG", quality=80)
-        os.replace(tmp_path, thumb_path)
+            # Unique tmp name: two threads (or two app instances) generating the
+            # same key must not write one file — os.replace could otherwise
+            # publish a truncated JPEG that then gets cached forever (round 3).
+            tmp_path = f"{thumb_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+            try:
+                img.save(tmp_path, "JPEG", quality=80)
+                os.replace(tmp_path, thumb_path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                raise
         return thumb_path
     except Exception:
         return path

@@ -244,6 +244,11 @@ class ResultsView(ft.Column):
     def select_default_duplicates(self):
         self.selected_paths.clear()
         for files in self.all_results.values():
+            # Never pre-select 0-byte "duplicates": hardlinking/deleting them
+            # frees nothing, and they are often deliberate markers (__init.py,
+            # .gitkeep, lock files) whose mass removal breaks projects (round 3).
+            if not files or files[0].size == 0:
+                continue
             for i, f in enumerate(files):
                 if i > 0:
                     self.selected_paths.add(f.path)

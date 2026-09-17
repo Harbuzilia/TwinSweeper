@@ -8,15 +8,16 @@ from scanner import FileInfo
 from db_cache import cache_db
 from locales import get_text
 
-# Formats PIL decodes out of the box. HEIC/RAW and friends need extra
-# plugins — they are counted and reported instead of silently ignored
-# (an iPhone library scanned with "0 groups found" is not "no duplicates").
+# Formats PIL decodes out of the box (AVIF included — Pillow 12.3 ships the
+# decoder). HEIC/RAW and friends need extra plugins — they are counted and
+# reported instead of silently ignored (an iPhone library scanned with
+# "0 groups found" is not "no duplicates").
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".jfif", ".png", ".webp", ".bmp", ".gif",
-    ".tiff", ".tif", ".ico", ".tga", ".ppm", ".pgm", ".pbm", ".pcx",
+    ".tiff", ".tif", ".ico", ".tga", ".ppm", ".pgm", ".pbm", ".pcx", ".avif",
 }
 UNSUPPORTED_IMAGE_EXTENSIONS = {
-    ".heic", ".heif", ".avif", ".cr2", ".nef", ".arw", ".dng",
+    ".heic", ".heif", ".cr2", ".nef", ".arw", ".dng",
     ".raw", ".orf", ".rw2", ".srw", ".raf",
 }
 
@@ -89,14 +90,22 @@ def scan_similar_images(
             progress_callback(msg, pct)
 
     def should_exclude(path: str) -> bool:
-        """Same matching rules as scanner.scan_directory: whole path components."""
+        """Same matching rules as scanner.scan_directory: whole path components,
+        or a normalized path prefix for patterns containing a separator."""
         if not exclude_patterns:
             return False
         path_norm = os.path.normpath(path).lower()
         components = path_norm.split(os.sep)
         for pattern in exclude_patterns:
             p = pattern.strip().lower()
-            if p and any(fnmatch.fnmatch(component, p) for component in components):
+            if not p:
+                continue
+            if os.sep in p or (os.altsep and os.altsep in p) or p.endswith(":"):
+                pat_path = os.path.normpath(p)
+                if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
+                    return True
+                continue
+            if any(fnmatch.fnmatch(component, p) for component in components):
                 return True
         return False
 
@@ -138,13 +147,15 @@ def scan_similar_images(
                     continue
 
     total_images = len(image_files)
+
+    # Report skipped formats BEFORE the early-return: a library of ONLY
+    # HEIC/RAW files has total_images < 2 and would otherwise silently return
+    # {} → "no duplicates found" with no explanation (round 3).
+    if skipped_unsupported and not is_cancelled():
+        report(get_text("phash_skipped_unsupported").format(', '.join(sorted(skipped_unsupported))), None)
+
     if total_images < 2 or is_cancelled():
         return {}
-
-    if skipped_unsupported:
-        # Better an explicit "we skipped HEIC" than a silent "0 groups found"
-        # on an iPhone photo library.
-        report(get_text("phash_skipped_unsupported").format(', '.join(sorted(skipped_unsupported))), None)
 
     report(get_text("phash_hashing").format(total_images), 0.1)
 
@@ -228,23 +239,40 @@ def scan_similar_images(
             if (hash_ints[i] ^ hash_ints[j]).bit_count() <= max_hamming_dist:
                 union_sets(i, j)
 
-    # 4. Group results
+    # 4. Group results — complete-linkage refinement (round 3).
+    # Union-find is transitive: A~B and B~C merge A with C even when the A–C
+    # distance is far beyond the threshold, so visually different photos end up
+    # in one "similar" group (and the user trusts it when deleting). Split each
+    # connected component into subclusters where EVERY pair is within the limit.
     from collections import defaultdict
-    clusters = defaultdict(list)
-    for idx, (info, phash) in enumerate(hashed_images):
-        root = find_set(idx)
-        clusters[root].append(info)
+    components = defaultdict(list)
+    for idx in range(num_hashes):
+        components[find_set(idx)].append(idx)
 
-    # Keep only clusters with 2+ images
     results = {}
-    for group_index, (root_id, files) in enumerate(clusters.items(), 1):
-        if len(files) > 1:
+    group_index = 0
+    for member_indices in components.values():
+        # Greedy complete-linkage: place each image into the first subcluster
+        # all of whose members are within the threshold, else start a new one.
+        subclusters: List[List[int]] = []
+        for idx in member_indices:
+            h = hash_ints[idx]
+            for sub in subclusters:
+                if all((h ^ hash_ints[other]).bit_count() <= max_hamming_dist for other in sub):
+                    sub.append(idx)
+                    break
+            else:
+                subclusters.append([idx])
+        for sub in subclusters:
+            if len(sub) < 2:
+                continue
+            files = [hashed_images[i][0] for i in sub]
             # Sort files in group by modification date (oldest first)
             files.sort(key=lambda x: x.modified)
+            group_index += 1
             # Numbered group key: two clusters whose first files share a name
             # must not overwrite each other in the dict (M3).
-            key = f"Photo Group {group_index}: {files[0].name}"
-            results[key] = files
+            results[f"Photo Group {group_index}: {files[0].name}"] = files
 
-    report("Similar photo scan complete!", 1.0)
+    report(get_text("scan_complete"), 1.0)
     return results

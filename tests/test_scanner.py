@@ -706,6 +706,25 @@ class TestExcludePatternMatching:
         paths = {f.path for files in results.values() for f in files}
         assert paths == {str(tmp_path / "keep.txt"), str(tmp_path / "app.logger.txt")}
 
+    def test_path_pattern_with_separator_excludes_subtree(self, tmp_path):
+        """Round 3: a pattern containing a separator (an absolute/relative path
+        like 'D:\\Games') must exclude that subtree. The component-only matcher
+        silently ignored such patterns, excluding nothing."""
+        keep = tmp_path / "keep"
+        skip = tmp_path / "skip"
+        keep.mkdir()
+        skip.mkdir()
+        (keep / "f.bin").write_bytes(b"DUP" * 100)
+        (skip / "f.bin").write_bytes(b"DUP" * 100)
+
+        results = scan_directory(
+            [str(tmp_path)], by_hash=True, use_cache=False,
+            exclude_patterns=[str(skip)],
+        )
+        # Only keep/f.bin survives → no duplicate pair → empty result.
+        # (Old code excluded nothing → the two files grouped → non-empty.)
+        assert results == {}
+
 
 class TestCompareCaseInsensitive:
     """Round 2: Windows paths are case-insensitive — without normcase keys,

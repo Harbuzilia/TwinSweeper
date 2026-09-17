@@ -190,6 +190,28 @@ class TestShortcuts:
         lnk = make_lnk(tmp_path / "ansi.lnk", str(target), encoding="mbcs")
         assert resolve_windows_shortcut_target(lnk) == str(target)
 
+    def test_shortcut_to_unavailable_drive_not_broken(self, tmp_path):
+        """Round 3: a shortcut whose target is on a disconnected drive / offline
+        share is NOT broken — deleting the .lnk would lose a working link. It
+        must be skipped, not offered for deletion."""
+        import string
+        free = next((d for d in string.ascii_uppercase if not os.path.exists(f"{d}:\\")), None)
+        if free is None:
+            pytest.skip("no free drive letter to simulate an offline target")
+        make_lnk(tmp_path / "offline.lnk", f"{free}:\\nonexistent\\target.txt")
+
+        broken = find_broken_shortcuts([str(tmp_path)])
+
+        assert broken == []
+
+    def test_shortcut_to_missing_file_on_live_drive_is_broken(self, tmp_path):
+        """Positive control: a target on an AVAILABLE drive that genuinely does
+        not exist IS broken and must be reported."""
+        target = tmp_path / "definitely_missing.txt"  # never created
+        lnk = make_lnk(tmp_path / "broken.lnk", str(target))
+        broken = find_broken_shortcuts([str(tmp_path)])
+        assert [b["path"] for b in broken] == [lnk]
+
 
 class TestNestedEmptyDirectoryDeletion:
     """Round-2 P0: callers pass set-derived (hash-random) folder order; deleting

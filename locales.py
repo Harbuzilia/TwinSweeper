@@ -184,6 +184,7 @@ translations = {
         "step_2_scope": "Step 2: Search Folders",
         "error_no_sample": "Please select a sample file to search for.",
         "error_no_scope": "Please select at least one search folder.",
+        "error_invalid_number": "Enter a valid whole number.",
 
         # Folder Compare
         "compare_folders": "Compare Folders",
@@ -496,6 +497,7 @@ translations = {
         "step_2_scope": "Шаг 2: Где искать копии",
         "error_no_sample": "Пожалуйста, выберите файл-образец.",
         "error_no_scope": "Пожалуйста, добавьте хотя бы одну папку для поиска.",
+        "error_invalid_number": "Введите корректное целое число.",
 
         # Folder Compare
         "compare_folders": "Сравнение папок",

@@ -22,6 +22,9 @@ class SampleSearchView(ft.Column):
         self.sample_path: Optional[str] = None
         self.search_directories: List[str] = []
         self.cancel_callback = None
+        # Run-generation counter (see search_view) — stale worker callbacks
+        # must not overwrite a newly started scan's UI.
+        self._run_gen = 0
 
         self.scroll = ft.ScrollMode.AUTO
         self.expand = True
@@ -242,7 +245,7 @@ class SampleSearchView(ft.Column):
             self.status_text.value = get_text("error_no_sample", self.language)
             self.status_text.color = DANGER_COLOR
             self.status_icon.visible = True
-            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.icon = ft.Icons.ERROR_OUTLINE_ROUNDED
             self.status_icon.color = DANGER_COLOR
             self.update()
             return
@@ -251,7 +254,7 @@ class SampleSearchView(ft.Column):
             self.status_text.value = get_text("error_no_scope", self.language)
             self.status_text.color = DANGER_COLOR
             self.status_icon.visible = True
-            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.icon = ft.Icons.ERROR_OUTLINE_ROUNDED
             self.status_icon.color = DANGER_COLOR
             self.update()
             return
@@ -264,7 +267,7 @@ class SampleSearchView(ft.Column):
             self.status_text.value = get_text("error_no_criteria", self.language)
             self.status_text.color = DANGER_COLOR
             self.status_icon.visible = True
-            self.status_icon.name = ft.Icons.ERROR_OUTLINE_ROUNDED
+            self.status_icon.icon = ft.Icons.ERROR_OUTLINE_ROUNDED
             self.status_icon.color = DANGER_COLOR
             self.update()
             return
@@ -276,12 +279,25 @@ class SampleSearchView(ft.Column):
         self.status_text.value = get_text("scanning", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.status_icon.visible = True
-        self.status_icon.name = ft.Icons.HOURGLASS_TOP_ROUNDED
+        self.status_icon.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self.status_icon.color = PRIMARY_COLOR
         self.update()
 
         def setup_cancel(cancel_fn):
             self.cancel_callback = cancel_fn
+
+        # Run-generation guard: a cancelled scan's late callbacks must not
+        # overwrite a newly started scan's UI (round 3).
+        self._run_gen += 1
+        gen = self._run_gen
+
+        def guarded_status(message, percent=None):
+            if gen == self._run_gen:
+                self.update_status(message, percent)
+
+        def guarded_finished():
+            if gen == self._run_gen:
+                self.on_scan_finished()
 
         self.on_scan_start(
             sample_path=self.sample_path,
@@ -290,9 +306,9 @@ class SampleSearchView(ft.Column):
             by_size=self.check_size.value,
             by_hash=self.check_hash.value,
             by_byte=self.check_byte.value,
-            progress_callback=self.update_status,
+            progress_callback=guarded_status,
             on_cancel_setup=setup_cancel,
-            on_scan_finished=self.on_scan_finished
+            on_scan_finished=guarded_finished
         )
 
     def on_scan_finished(self):

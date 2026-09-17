@@ -228,3 +228,39 @@ class TestUnsupportedFormatsReported:
         # "0 groups found" on an iPhone library is not "no duplicates" — the
         # skipped formats must at least be named.
         assert any("unsupported" in m.lower() and ".heic" in m.lower() for m in messages)
+
+
+class TestCompleteLinkageClustering:
+    """Round 3: union-find is transitive — A~B and B~C merged A with C even
+    when the A–C distance is far beyond the threshold, putting visually
+    different photos in one 'similar' group. Complete-linkage must split them:
+    the two distant endpoints never share a group."""
+
+    def test_chain_endpoints_never_grouped(self, tmp_path, monkeypatch):
+        import phash_scanner
+        for name in ("a.png", "b.png", "c.png"):
+            make_gradient_image(tmp_path / name)
+
+        # Controlled 64-bit hashes: a=0 bits, b=6 bits, c=12 bits.
+        # hamming(a,b)=6, hamming(b,c)=6, hamming(a,c)=12.
+        hashes = {
+            "a.png": "0000000000000000",
+            "b.png": "000000000000003f",
+            "c.png": "0000000000000fff",
+        }
+        monkeypatch.setattr(
+            phash_scanner, "compute_dhash",
+            lambda path, hash_size=8: hashes.get(os.path.basename(path)),
+        )
+
+        # threshold 0.90 → max_hamming_dist = int(64 * 0.10) = 6
+        results = phash_scanner.scan_similar_images([str(tmp_path)], similarity_threshold=0.90)
+
+        # Whatever the (non-deterministic) processing order, complete-linkage
+        # guarantees: one group of 2 (b with whichever endpoint came first),
+        # and the two distant endpoints a & c are NEVER together. Old
+        # union-find returned a single group of all three.
+        assert len(results) == 1
+        names = {os.path.basename(f.path) for f in next(iter(results.values()))}
+        assert len(names) == 2
+        assert not {"a.png", "c.png"} <= names

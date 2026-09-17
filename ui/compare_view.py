@@ -40,6 +40,16 @@ class CompareView(ft.Column):
 
         self.results_container = ft.Column(spacing=12)
 
+        # Compare start button + busy guard: a double click used to launch two
+        # parallel compare_folders workers whose results interleaved (round 3).
+        self._compare_busy = False
+        self.compare_button = get_primary_button(
+            text=get_text("start_compare", language),
+            on_click=self.start_compare,
+            icon=ft.Icons.COMPARE_ARROWS_ROUNDED,
+            height=46
+        )
+
         self.build_ui()
 
     def get_detected_drives(self) -> list[str]:
@@ -122,12 +132,7 @@ class CompareView(ft.Column):
                 status_icon=ft.Icon(ft.Icons.COMPARE_ARROWS_ROUNDED, size=18, color=PRIMARY_COLOR),
                 status_text=self.status_text,
                 progress_bar=self.progress_bar,
-                primary_action_btn=get_primary_button(
-                    text=get_text("start_compare", self.language),
-                    on_click=self.start_compare,
-                    icon=ft.Icons.COMPARE_ARROWS_ROUNDED,
-                    height=46
-                )
+                primary_action_btn=self.compare_button
             ),
 
             # Results Section
@@ -159,6 +164,8 @@ class CompareView(ft.Column):
             self.set_folder_b(path)
 
     def start_compare(self, e):
+        if self._compare_busy:
+            return
         if not self.folder_a or not self.folder_b:
             self.status_text.value = get_text("error_select_both", self.language)
             self.status_text.color = DANGER_COLOR
@@ -171,6 +178,8 @@ class CompareView(ft.Column):
             self._safe_update()
             return
 
+        self._compare_busy = True
+        self.compare_button.visible = False
         self.progress_bar.visible = True
         self.status_text.value = get_text("comparing", self.language)
         self.status_text.color = TEXT_SECONDARY
@@ -202,6 +211,8 @@ class CompareView(ft.Column):
         """A failed comparison is an error state, not an empty result —
         hiding the progress bar and coloring the status red tells the user
         something actually went wrong."""
+        self._compare_busy = False
+        self.compare_button.visible = True
         self.progress_bar.visible = False
         self.status_text.value = message
         self.status_text.color = DANGER_COLOR
@@ -210,6 +221,8 @@ class CompareView(ft.Column):
     def show_results(self, results: dict):
         if self.parent is None:
             return
+        self._compare_busy = False
+        self.compare_button.visible = True
         self.progress_bar.visible = False
         self.status_text.value = ""
         self.comparison_data = results

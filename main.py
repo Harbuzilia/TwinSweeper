@@ -440,6 +440,11 @@ def main(page: ft.Page):
     def set_trash_default(value: bool):
         trash_default[0] = bool(value)
         save_settings({"trash_default": bool(value)})
+        # Cached views captured the old value at construction — drop them so the
+        # sweeper is rebuilt with the new trash default on the next visit
+        # (round 3: the setting used to have no effect until a language/theme
+        # switch happened to clear the cache).
+        view_cache.clear()
 
     # CLI Directory Arguments
     initial_cli_dirs = []
@@ -1039,7 +1044,10 @@ def main(page: ft.Page):
                 actions=[get_primary_button(text=get_text("ok", current_language), on_click=lambda _: page.pop_dialog(), height=36)]
             )
             page.show_dialog(dlg)
-            on_nav_change(0)
+            # Stay on the Settings tab (index 5) and rebuild it so the
+            # register/unregister button label reflects the new state — the old
+            # on_nav_change(0) threw the user back to the Scanner tab.
+            on_nav_change(5)
 
         return ft.Column([
             get_header_row(
