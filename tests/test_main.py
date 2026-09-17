@@ -50,19 +50,18 @@ class TestVerifyFileUnchanged:
         assert "modified" in reason.lower()
 
     def test_missing_file_fails_with_reason(self, tmp_path):
+        # A vanished file must be reported (non-empty reason ends up in the
+        # per-file error list), never crash the worker.
         ok, reason = main.verify_file_unchanged(str(tmp_path / "gone.bin"), 10, 1234.5)
         assert ok is False
-        assert reason  # non-empty reason ends up in the per-file error list
-
-    def test_missing_file_does_not_raise(self, tmp_path):
-        # A vanished file must be reported, never crash the worker.
-        main.verify_file_unchanged(str(tmp_path / "vanished.bin"), 1, 0.0)
+        assert reason
 
 
 class TestCompareFallbackSchema:
     def test_fallback_has_same_keys_as_real_result(self, tmp_path):
         """H2: run_compare()'s error fallback must be renderable by
-        compare_view — same keys as a real compare_folders() result."""
+        compare_view — same keys as a real compare_folders() result, and
+        every value empty (it stands in for a failed comparison)."""
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.mkdir()
@@ -72,8 +71,6 @@ class TestCompareFallbackSchema:
 
         real = scanner.compare_folders(str(a), str(b))
         assert set(main.EMPTY_COMPARE_RESULT.keys()) == set(real.keys())
-
-    def test_fallback_values_are_empty(self):
         assert main.EMPTY_COMPARE_RESULT["unique_a"] == []
         assert main.EMPTY_COMPARE_RESULT["unique_b"] == []
         assert main.EMPTY_COMPARE_RESULT["common"] == []
@@ -92,10 +89,6 @@ class TestBuildHardlinkLogPairs:
         }
         pairs = main.build_hardlink_log_pairs(groups_map, ["dup1.jpg", "dup3.jpg"])
         assert pairs == [("orig/a.jpg", "dup1.jpg"), ("orig/b.jpg", "dup3.jpg")]
-
-    def test_tuple_entries_match_string_paths(self):
-        groups_map = {"o.txt": [("d.txt", 1, 1.0)]}
-        assert main.build_hardlink_log_pairs(groups_map, ["d.txt"]) == [("o.txt", "d.txt")]
 
     def test_nothing_succeeded_yields_no_pairs(self):
         groups_map = {"o.txt": [("d.txt", 1, 1.0)]}

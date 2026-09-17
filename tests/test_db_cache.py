@@ -16,9 +16,14 @@ class TestDataDirIsolation:
 
     def test_real_project_dir_is_not_touched(self, isolated_data_dir):
         # The data dir must never resolve to the project root in tests.
-        assert os.path.normcase(get_data_dir()) != os.path.normcase(
-            os.path.dirname(os.path.abspath(__file__)) + os.sep + ".."
+        # Both sides normalized — the old un-normalized "tests\.." comparison
+        # was string-unequal to ANY real path and proved nothing.
+        project_root = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         )
+        assert os.path.normcase(get_data_dir()) != os.path.normcase(project_root)
+        # Positive control: it really is the throwaway dir.
+        assert os.path.normcase(get_data_dir()) == os.path.normcase(isolated_data_dir)
 
 
 class TestSingleton:

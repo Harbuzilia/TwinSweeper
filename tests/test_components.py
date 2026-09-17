@@ -87,5 +87,7 @@ class TestGetDetectedDrives:
             assert os.path.exists(d)
 
     def test_system_drive_present(self):
-        drives = get_detected_drives()
-        assert "C:\\" in drives
+        # Derived from the environment, not a hardcoded "C:\" — valid on any
+        # Windows regardless of which drive hosts the OS.
+        system_drive = os.environ.get("SystemDrive", "C:") + "\\"
+        assert system_drive in get_detected_drives()

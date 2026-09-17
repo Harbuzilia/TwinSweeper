@@ -22,9 +22,12 @@ class TestCompareErrorDisplay:
         assert view.status_text.color is not None  # error styling applied
 
     def test_show_error_is_safe_unmounted(self):
-        # Constructed but never added to a page — must not raise.
+        # Constructed but never added to a page — must not raise, and must
+        # still record the error state (not just "didn't crash").
         view = make_compare_view()
         view.show_error("any error")
+        assert view.status_text.value == "any error"
+        assert view.progress_bar.visible is False
 
     def test_start_compare_passes_error_callback(self, tmp_path):
         received = {}

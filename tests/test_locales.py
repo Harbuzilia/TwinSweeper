@@ -31,32 +31,50 @@ class TestKeyParity:
             empty = [k for k, v in table.items() if not isinstance(v, str) or not v.strip()]
             assert not empty, f"Empty values in {lang}: {empty}"
 
-    def test_at_least_100_keys(self, en_keys):
-        assert len(en_keys) >= 100
+    def test_translation_table_is_substantial(self, en_keys, ru_keys):
+        # Guards against accidental truncation of the table. (The old
+        # ">= 100" floor was unreachable-low with 400+ keys and proved
+        # nothing; specific keys are pinned by test_round2_keys_exist_paired.)
+        assert len(en_keys) >= 250
+        assert len(ru_keys) >= 250
+
+
+def _placeholder_arity(value: str) -> int:
+    """Number of positional args a format string needs, counting BOTH {} and
+    {0}-style fields (the table mixes them)."""
+    import string
+    fields = [fname for _, fname, _, _ in string.Formatter().parse(value) if fname is not None]
+    numbered = [int(f) for f in fields if f.isdigit()]
+    return max(len(fields), (max(numbered) + 1) if numbered else 0)
 
 
 class TestPlaceholderConsistency:
-    """A mismatched {} count between RU and EN crashes .format() at runtime."""
+    """A mismatched placeholder arity between RU and EN crashes .format() at
+    runtime — and the old check only counted `{}`, missing every `{0}` key."""
 
-    def test_format_placeholder_counts_match(self, en_keys):
+    def test_format_placeholder_arity_matches(self, en_keys):
         problems = []
         for key in sorted(en_keys):
             en_val = translations["en"].get(key, "")
             ru_val = translations["ru"].get(key, "")
-            n_en = en_val.count("{}")
-            n_ru = ru_val.count("{}")
-            if n_en != n_ru:
-                problems.append(f"{key}: en has {n_en}, ru has {n_ru}")
+            if _placeholder_arity(en_val) != _placeholder_arity(ru_val):
+                problems.append(
+                    f"{key}: en needs {_placeholder_arity(en_val)}, ru needs {_placeholder_arity(ru_val)}"
+                )
         assert not problems, "\n".join(problems)
 
     def test_all_translations_format_cleanly(self):
-        filler = "X"
+        # Real check: format every value with exactly its own arity. Mixing
+        # {} and {0} in one string, or a stray brace, raises here.
+        problems = []
         for lang, table in translations.items():
             for key, value in table.items():
-                if "{}" in value:
-                    # .format() must not raise and must consume every placeholder
-                    formatted = value.format(*(filler,) * value.count("{}"))
-                    assert filler in formatted
+                arity = _placeholder_arity(value)
+                try:
+                    value.format(*(["X"] * arity))
+                except (IndexError, KeyError, ValueError) as ex:
+                    problems.append(f"{lang}:{key}: {ex}")
+        assert not problems, "\n".join(problems)
 
 
 class TestGetText:

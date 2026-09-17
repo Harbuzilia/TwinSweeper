@@ -275,21 +275,62 @@ class TestSmartSelectRules:
         assert view.selected_paths == {f1.path}
 
 
-class TestHtmlExport:
-    def test_html_report_written(self, tmp_path):
+class TestExportFormats:
+    """All four export formats, checked by real output structure — not just
+    'some substring is present'."""
+
+    @staticmethod
+    def _view(tmp_path):
         g = [make_info(str(tmp_path / "a0.bin"), 100),
-             make_info(str(tmp_path / "a1.bin"), 100)]
-        view = make_view({"k": g})
+             make_info(str(tmp_path / "a1.bin"), 200)]
+        return make_view({"group-key": g})
+
+    def test_html_report_structure(self, tmp_path):
+        view = self._view(tmp_path)
         target = tmp_path / "report.html"
-
         view.write_export_file(str(target), "html")
-
         content = target.read_text(encoding="utf-8")
         assert content.startswith("<!DOCTYPE html>")
-        assert "a0.bin" in content
-        assert "a1.bin" in content
+        # Group header row + both file rows + reclaimable (= all but first).
+        assert "<tr class='group'>" in content
+        assert "group-key" in content
+        assert "a0.bin" in content and "a1.bin" in content
+        assert "200" in content  # reclaimable bytes = a1.bin size
 
-    def test_export_failure_never_raises(self, tmp_path):
+    def test_csv_has_bom_for_excel(self, tmp_path):
+        view = self._view(tmp_path)
+        target = tmp_path / "report.csv"
+        view.write_export_file(str(target), "csv")
+        raw = target.read_bytes()
+        # utf-8-sig BOM — without it Excel opens Cyrillic paths as garbage.
+        assert raw.startswith(b"\xef\xbb\xbf")
+        text = raw.decode("utf-8-sig")
+        assert text.splitlines()[0].startswith("Group,File Name")
+        assert "a0.bin" in text
+
+    def test_json_schema(self, tmp_path):
+        import json
+        view = self._view(tmp_path)
+        target = tmp_path / "report.json"
+        view.write_export_file(str(target), "json")
+        data = json.loads(target.read_text(encoding="utf-8"))
+        assert data["total_groups"] == 1
+        assert data["groups"]["group-key"]
+        assert len(data["groups"]["group-key"]) == 2
+
+    def test_txt_report(self, tmp_path):
+        view = self._view(tmp_path)
+        target = tmp_path / "report.txt"
+        view.write_export_file(str(target), "txt")
+        text = target.read_text(encoding="utf-8")
+        assert "DUPLICATER REPORT" in text
+        assert "a0.bin" in text
+
+    def test_export_failure_is_logged_not_swallowed_silently(self, tmp_path, caplog):
+        import logging
         view = make_view({"k": [make_info(str(tmp_path / "a.bin"), 10)]})
-        # A directory as the target file: open() fails — must be swallowed.
-        view.write_export_file(str(tmp_path), "txt")
+        with caplog.at_level(logging.WARNING):
+            # A directory as the target file: open() fails.
+            view.write_export_file(str(tmp_path), "txt")
+        # Swallowed for the UI, but it MUST surface in the log.
+        assert any("Export error" in r.message for r in caplog.records)

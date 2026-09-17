@@ -1,6 +1,7 @@
 """Tests for scanner.py — hashing, grouping, filters, turbo verification."""
 import hashlib
 import os
+import threading
 import time
 
 import pytest
@@ -214,12 +215,30 @@ class TestScanDirectory:
     def test_nonexistent_directory_is_skipped(self, tmp_path):
         assert scan_directory([str(tmp_path / "no_such_dir")]) == {}
 
-    def test_cache_roundtrip_second_scan_identical(self, dup_tree):
+    def test_second_scan_is_served_from_cache(self, dup_tree, monkeypatch):
+        """The cache's whole point: an unchanged tree must NOT be re-hashed.
+        Proven by counting real hash invocations on the second scan — the old
+        test only compared results and passed even with a dead cache."""
         first = scan_directory([str(dup_tree)])
-        # Second scan must hit the SQLite cache and still group correctly.
+        assert first  # sanity: duplicates found and cached
+
+        hash_calls = []
+        real_turbo = scanner.get_turbo_hash
+        real_full = scanner.get_file_hash
+        monkeypatch.setattr(
+            scanner, "get_turbo_hash",
+            lambda p, *a, **k: hash_calls.append(("turbo", p)) or real_turbo(p, *a, **k),
+        )
+        monkeypatch.setattr(
+            scanner, "get_file_hash",
+            lambda p, *a, **k: hash_calls.append(("full", p)) or real_full(p, *a, **k),
+        )
+
         second = scan_directory([str(dup_tree)])
-        assert {k: [f.path for f in v] for k, v in first.items()} == \
-               {k: [f.path for f in v] for k, v in second.items()}
+
+        assert {k: [f.path for f in v] for k, v in second.items()} == \
+               {k: [f.path for f in v] for k, v in first.items()}
+        assert hash_calls == []  # zero re-hashing — everything came from SQLite
 
     def test_cache_invalidated_after_file_change(self, dup_tree):
         scan_directory([str(dup_tree)])
@@ -244,8 +263,6 @@ class TestScanDirectory:
 
         results = scan_directory([str(tmp_path)], turbo_mode=True)
         assert results == {}
-
-    def_turbo = None
 
     def test_byte_by_byte_verification(self, tmp_path):
         block = 65536
@@ -449,22 +466,45 @@ class TestCancelDuringHash:
     (shutdown(wait=True) via __exit__), so "cancelled" scans kept hashing."""
 
     def test_cancel_returns_without_waiting_for_running_hashes(self, tmp_path, monkeypatch):
+        """Deterministic (no wall-clock threshold, no startup race).
+
+        7 straggler tasks block on an Event and signal once they are inside
+        hashing; f0 waits for that signal, THEN flips the cancel flag. So at
+        the moment the scan can return, all 7 are provably in flight. If the
+        scan returned without joining them (the fix), they are still blocked;
+        the old `with ThreadPoolExecutor` block joined them, draining the list.
+        """
         for i in range(8):
             (tmp_path / f"f{i}.bin").write_bytes(b"x" * 100)
 
+        n_stragglers = 7
         flag = [False]
+        in_flight = []
+        started = []
+        all_started = threading.Event()
+        release = threading.Event()
+        lock = threading.Lock()
         real_hash = scanner.get_file_hash
 
-        def cancel_hash(path):
+        def blocking_hash(path):
             if os.path.basename(path) == "f0.bin":
-                flag[0] = True  # flip the flag from inside the first completed hash
+                # Cancel only once every straggler is confirmed in flight.
+                all_started.wait(timeout=5)
+                flag[0] = True
                 return real_hash(path)
-            time.sleep(1.2)
+            in_flight.append(path)
+            with lock:
+                started.append(path)
+                if len(started) == n_stragglers:
+                    all_started.set()
+            try:
+                release.wait(timeout=5)
+            finally:
+                in_flight.remove(path)
             return real_hash(path)
 
-        monkeypatch.setattr(scanner, "get_file_hash", cancel_hash)
+        monkeypatch.setattr(scanner, "get_file_hash", blocking_hash)
 
-        started = time.monotonic()
         results = scan_directory(
             [str(tmp_path)],
             by_hash=True,
@@ -473,12 +513,13 @@ class TestCancelDuringHash:
             cancel_flag=flag,
             max_workers=8,
         )
-        elapsed = time.monotonic() - started
+        still_running = list(in_flight)  # snapshot BEFORE releasing stragglers
+        release.set()
 
         assert results == {}
-        # Old behavior waited for the 7 sleeping tasks (~1.2 s+); the fix
-        # returns as soon as cancellation is observed.
-        assert elapsed < 0.7
+        assert len(still_running) == n_stragglers, (
+            "scan joined the running hashes instead of returning immediately"
+        )
 
     def test_queued_hash_tasks_skip_work_after_cancel(self, tmp_path, monkeypatch):
         """The per-task cancel check: with 1 worker and 6 files, flipping the

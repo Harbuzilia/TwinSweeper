@@ -8,6 +8,7 @@ import os
 
 from PIL import Image
 
+from db_cache import get_data_dir
 from ui.thumbnails import THUMBS_DIR, get_cached_thumbnail
 
 
@@ -36,8 +37,17 @@ class TestThumbnailCache:
     def test_second_call_hits_the_cache(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ui.thumbnails.THUMBS_DIR", str(tmp_path / "thumbs"))
         photo = make_photo(tmp_path / "big.png")
+        mtime = os.path.getmtime(photo)
         first = get_cached_thumbnail(photo)
-        assert get_cached_thumbnail(photo, os.path.getmtime(photo)) == first
+
+        # Prove it is a CACHE HIT, not a silent regeneration: delete the
+        # source. A second call with the same mtime must still succeed from
+        # the cached thumbnail (it cannot re-decode a file that is gone).
+        os.remove(photo)
+        second = get_cached_thumbnail(photo, mtime)
+
+        assert second == first
+        assert os.path.exists(second)
 
     def test_changed_mtime_regenerates(self, tmp_path, monkeypatch):
         monkeypatch.setattr("ui.thumbnails.THUMBS_DIR", str(tmp_path / "thumbs"))
@@ -58,8 +68,10 @@ class TestThumbnailCache:
         assert get_cached_thumbnail(str(broken)) == str(broken)
         assert not os.path.exists(str(tmp_path / "thumbs"))
 
-    def test_default_dir_lives_in_the_app_data_dir(self):
-        # The real data dir is redirected by conftest's DUPLICATER_DATA_DIR —
-        # thumbnails must never land next to the user's photos.
-        assert THUMBS_DIR.endswith("thumbs")
-        assert "duplicater" in os.path.basename(os.path.dirname(THUMBS_DIR)).lower()
+    def test_default_dir_lives_in_the_isolated_data_dir(self, isolated_data_dir):
+        # Positive control: THUMBS_DIR is derived from get_data_dir(), which
+        # conftest points at the throwaway dir — never the project/profile.
+        # (The old check matched the substring "duplicater", which the real
+        # project dir also contains — it proved nothing.)
+        assert THUMBS_DIR == os.path.join(get_data_dir(), "thumbs")
+        assert os.path.normcase(THUMBS_DIR).startswith(os.path.normcase(isolated_data_dir))

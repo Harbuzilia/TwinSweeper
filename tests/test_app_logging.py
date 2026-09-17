@@ -51,6 +51,7 @@ class TestSetupLogging:
     def test_unwritable_location_never_raises(self, tmp_path):
         root = logging.getLogger()
         saved_handlers, saved_level = list(root.handlers), root.level
+        before = len(_file_handlers())
         try:
             # A regular file used as the "data directory": creating the log
             # file inside it must fail — the app has to survive that.
@@ -58,11 +59,17 @@ class TestSetupLogging:
             blocker.write_text("not a directory")
             log_path = app_logging.setup_logging(str(blocker))
             assert log_path  # returns the intended path, does not raise
+            # The handler must NOT have been attached, and logging still works.
+            assert len(_file_handlers()) == before
+            app_logging.get_logger("t").warning("still safe")
         finally:
             self._restore_root(saved_handlers, saved_level)
 
     def test_logger_works_before_setup(self):
         # Modules import get_logger at import time, long before main() runs
-        # setup_logging — that must be a safe call emitting nothing.
+        # setup_logging — that must be safe and must NOT attach file handlers.
+        before = _file_handlers()
         log = app_logging.get_logger("pre_setup")
+        assert isinstance(log, logging.Logger)
         log.debug("silent before setup")
+        assert _file_handlers() == before  # no handler materialized
