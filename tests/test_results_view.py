@@ -349,6 +349,47 @@ class TestMoveProtectsOriginal:
         assert {e[0] for e in moves[0]} == {g[2].path}
 
 
+class TestTrashAvailabilityGating:
+    """Round 3 A4: when send2trash is unavailable, the 'to Recycle Bin'
+    checkbox must be disabled and unchecked — confirming the dialog then
+    explicitly means permanent deletion, never a silent fallback."""
+
+    @staticmethod
+    def _dialog_checkbox(view):
+        class FakePage:
+            def __init__(self):
+                self.dialogs = []
+
+            def show_dialog(self, d):
+                self.dialogs.append(d)
+
+            def pop_dialog(self):
+                return self.dialogs.pop() if self.dialogs else None
+
+        page = FakePage()
+        view._page_or_none = lambda: page
+        view.on_delete_clicked(None)
+        assert len(page.dialogs) == 1
+        # The trash checkbox is the last control of the dialog content column.
+        return page.dialogs[0].content.controls[-1]
+
+    def test_checkbox_disabled_when_trash_unavailable(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, trash_available=False, trash_default=True)
+        cb = self._dialog_checkbox(view)
+        assert cb.disabled is True
+        assert cb.value is False
+
+    def test_checkbox_enabled_when_trash_available(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, trash_available=True, trash_default=True)
+        cb = self._dialog_checkbox(view)
+        assert cb.disabled is False
+        assert cb.value is True
+
+
 class TestExportFormats:
     """All four export formats, checked by real output structure — not just
     'some substring is present'."""

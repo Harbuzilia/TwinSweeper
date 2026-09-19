@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
 
-    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True, content_verified: bool = True):
+    def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True, content_verified: bool = True, trash_available: bool = True):
         super().__init__()
         self.all_results = dict(results)
         self.filtered_results = dict(results)
@@ -38,6 +38,10 @@ class ResultsView(ft.Column):
         self.on_move = on_move
         self.language = language
         self.allow_hardlink = allow_hardlink
+        # False when send2trash is unavailable: the "to Recycle Bin" checkbox is
+        # then disabled and unchecked, so confirming the dialog explicitly means
+        # permanent deletion instead of silently falling back to it (round 3 A4).
+        self.trash_available = trash_available
         # False when files were grouped by size/name only (content never
         # compared) — such groups must NOT be preselected for deletion, and a
         # warning banner is shown (round 3: a size-only scan preselected
@@ -1025,7 +1029,13 @@ class ResultsView(ft.Column):
         def cancel_dialog(e):
             page.pop_dialog()
 
-        trash_checkbox = ft.Checkbox(label=get_text("send_to_trash_label", self.language), value=self.trash_default)
+        # Without send2trash the "to Recycle Bin" option is a lie — disable it
+        # so the confirm dialog explicitly means permanent deletion.
+        trash_checkbox = ft.Checkbox(
+            label=get_text("send_to_trash_label", self.language),
+            value=self.trash_default and self.trash_available,
+            disabled=not self.trash_available
+        )
 
         content_controls = [
             ft.Text(get_text("delete_summary_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),

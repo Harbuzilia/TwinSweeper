@@ -679,7 +679,8 @@ def main(page: ft.Page):
             language=current_language,
             allow_hardlink=allow_hardlink,
             trash_default=trash_default[0],
-            content_verified=content_verified
+            content_verified=content_verified,
+            trash_available=HAS_SEND2TRASH
         )
         showing_results[0] = True
         main_content_container.content = results_view_instance
