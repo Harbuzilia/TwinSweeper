@@ -354,7 +354,15 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
                 if not ok:
                     state["errors"].append(get_text("error_verify_failed").format(path, reason))
                     continue
-                dest_path = _reserve_destination(destination, path)
+                # The reservation itself can fail (read-only destination,
+                # disk full): report it as a per-file error and keep the
+                # pipeline running for the remaining files — an escape here
+                # used to kill the whole worker thread (2.2b).
+                try:
+                    dest_path = _reserve_destination(destination, path)
+                except Exception as ex:
+                    state["errors"].append(get_text("error_move").format(path, ex))
+                    continue
                 try:
                     if is_same_volume(path, destination):
                         # Same volume: atomic rename, no copy window at all.

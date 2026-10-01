@@ -247,6 +247,32 @@ class TestPerformMovePipeline:
         assert len(ops) == 1 and ops[0]["type"] == "move"
         assert len(ops[0]["details"]["pairs"]) == state["moved_count"]
 
+    def test_reserve_failure_is_reported_and_pipeline_continues(self, tmp_path, monkeypatch, isolated_ops_log):
+        """2.2b: _reserve_destination ran OUTSIDE the per-file try — a single
+        failing reservation (read-only destination, disk full) escaped
+        perform_move entirely and killed the worker thread instead of being
+        reported as a per-file error with the rest of the batch finished."""
+        entries = self._make_sources(tmp_path)
+        dest = tmp_path / "dest"
+        real_reserve = main._reserve_destination
+
+        def reserve_failing_for_a(destination, source_path):
+            if os.path.basename(source_path) == "a.bin":
+                raise PermissionError("destination is read-only")
+            return real_reserve(destination, source_path)
+
+        monkeypatch.setattr(main, "_reserve_destination", reserve_failing_for_a)
+
+        state = main.perform_move(entries, str(dest))
+
+        assert state["moved_count"] == 1  # b.bin still processed
+        assert any("a.bin" in e for e in state["errors"])
+        assert (tmp_path / "src" / "a.bin").exists()  # refused file intact
+        assert (dest / "b.bin").read_bytes() == b"BBB"
+        ops = isolated_ops_log.load_operations()
+        assert ops and ops[0]["type"] == "move"
+        assert ops[0]["paths"] == [str(tmp_path / "src" / "b.bin")]
+
 
 class TestTrashAvailability:
     def test_trash_unavailable_refuses_permanent_delete(self, tmp_path, monkeypatch, isolated_ops_log):
