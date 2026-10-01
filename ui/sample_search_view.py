@@ -118,7 +118,7 @@ class SampleSearchView(ft.Column):
                     ft.Row([
                         ft.Icon(ft.Icons.FINGERPRINT_ROUNDED, color=PRIMARY_COLOR, size=20),
                         ft.Text(get_text("step_1_sample", self.language), size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    ]),
                     ft.Row([
                         get_primary_button(
                             text=get_text("choose_file", self.language),
@@ -139,7 +139,7 @@ class SampleSearchView(ft.Column):
                         ft.Text(get_text("step_2_scope", self.language), size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                         get_badge(f"{len(self.search_directories)}", color=ACCENT_COLOR),
                         ft.Container(expand=True),
-                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                     ]),
                     ft.Row([
                         get_primary_button(

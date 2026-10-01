@@ -7,10 +7,12 @@ from ui.components import (
     THEMES,
     format_path_short,
     get_active_theme_key,
+    get_badge,
     get_current_theme,
     get_detected_drives,
     get_styled_dialog,
     set_active_theme,
+    tint,
 )
 
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
@@ -161,3 +163,23 @@ class TestStyledDialog:
         dlg = get_styled_dialog(title="t", content=body, width=400)
         assert isinstance(dlg.content, ft.Container)
         assert dlg.content.content is body
+
+
+class TestTint:
+    """Round 4 design fix: flet (like Flutter) parses 8-digit hex as
+    #AARRGGBB. Tints written as f"{COLOR}1C" (#RRGGBBAA) made the client read
+    the alpha byte as red — indigo tints rendered lime-green, translucent
+    shadows rendered fully transparent. tint() must emit alpha-first."""
+
+    def test_tint_is_alpha_first(self):
+        assert tint("#6366F1", "1C") == "#1C6366F1"
+
+    def test_tint_strips_hash_and_uppercases(self):
+        assert tint("6366f1", "22") == "#226366F1"
+
+    def test_non_hex_color_passes_through(self):
+        assert tint("transparent", "1C") == "transparent"
+
+    def test_badge_bgcolor_is_alpha_first(self):
+        badge = get_badge("x", color="#6366F1")
+        assert badge.bgcolor == "#226366F1"

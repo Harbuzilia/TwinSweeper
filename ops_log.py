@@ -116,6 +116,12 @@ def undo_move_operation(op_id: str) -> Tuple[int, List[str]]:
             if os.path.exists(source):
                 errors.append(f"Target already exists: {source}")
                 continue
+            # The source folder may have been removed (e.g. by the
+            # "remove emptied folders" option after the move) — restore the
+            # original layout instead of failing the undo.
+            parent = os.path.dirname(source)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             shutil.move(dest, source)
             restored += 1
         except Exception as ex:

@@ -19,6 +19,7 @@ from scanner import (
 )
 from phash_scanner import scan_similar_images
 from hardlink_manager import batch_replace_with_hardlinks, is_same_volume
+from sweeper import remove_emptied_parents
 from db_cache import cache_db
 from ops_log import load_operations, log_delete_operation, log_hardlink_operation, log_move_operation, undo_hardlink_operation, undo_move_operation, get_data_dir
 
@@ -29,7 +30,7 @@ from ui.compare_view import CompareView
 from ui.sweeper_view import SweeperView
 from ui.components import (
     get_styled_card, get_stat_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_styled_dialog, get_action_icon_button,
+    get_styled_dialog, get_action_icon_button, tint,
     set_active_theme, get_active_theme_key, get_current_theme,
     BG_COLOR, SURFACE_HOVER, BORDER_COLOR,
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, DANGER_COLOR,
@@ -231,15 +232,17 @@ def _reserve_destination(destination: str, source_path: str) -> str:
 
 PIPELINE_CHUNK = 200
 
-def perform_delete(file_entries: List[Tuple[str, int, float]], use_trash: bool, cancel_flag: List[bool] = None, progress_callback=None) -> dict:
+def perform_delete(file_entries: List[Tuple[str, int, float]], use_trash: bool, cancel_flag: List[bool] = None, progress_callback=None, remove_empty_folders: bool = False) -> dict:
     """The delete pipeline. file_entries: (path, size, mtime) scan snapshots.
 
     Per file: C2 re-verification, then Recycle Bin (a trash failure NEVER
     falls back to a permanent delete — H5) or os.remove. Journaled at the end
     with only the actually deleted paths. progress_callback(processed, total)
-    fires once per 200-file chunk."""
+    fires once per 200-file chunk. With remove_empty_folders=True, folders
+    left empty by the deletions are removed too (os.rmdir only — a folder
+    that still holds anything is always left alone)."""
     total = len(file_entries)
-    state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": []}
+    state = {"deleted_count": 0, "total_freed": 0, "errors": [], "actually_deleted": [], "empty_folders_removed": 0}
 
     try:
         for start in range(0, total, PIPELINE_CHUNK):
@@ -282,6 +285,10 @@ def perform_delete(file_entries: List[Tuple[str, int, float]], use_trash: bool, 
         # skip the journal, making those deletions permanent).
         if state["actually_deleted"]:
             log_delete_operation(state["actually_deleted"], state["total_freed"], use_trash)
+            if remove_empty_folders:
+                removed, errs = remove_emptied_parents(state["actually_deleted"])
+                state["empty_folders_removed"] = removed
+                state["errors"].extend(errs)
     return state
 
 def perform_hardlink(groups_map: Dict[str, List[Tuple[str, int, float]]], cancel_flag: List[bool] = None, progress_callback=None) -> dict:
@@ -328,7 +335,7 @@ def perform_hardlink(groups_map: Dict[str, List[Tuple[str, int, float]]], cancel
                 log_hardlink_operation(pairs, state["freed_bytes"])
     return state
 
-def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, cancel_flag: List[bool] = None, progress_callback=None) -> dict:
+def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, cancel_flag: List[bool] = None, progress_callback=None, remove_empty_folders: bool = False) -> dict:
     """The move pipeline — the reversible alternative to deletion.
 
     Per file: C2 re-verification, an atomically reserved collision-free
@@ -336,9 +343,10 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
     or a cross-volume copy-to-temp + replace. The source is dropped only once
     the copy is fully in place; if dropping it fails, the copy is removed too
     so we never leave an invisible duplicate. Journaled for undo (even on a
-    mid-operation cancel)."""
+    mid-operation cancel). With remove_empty_folders=True, source folders
+    left empty by the moves are removed too (os.rmdir only)."""
     total = len(file_entries)
-    state = {"moved_count": 0, "actually_moved": [], "errors": [], "destination": destination}
+    state = {"moved_count": 0, "actually_moved": [], "errors": [], "destination": destination, "empty_folders_removed": 0}
     try:
         os.makedirs(destination, exist_ok=True)
     except OSError as ex:
@@ -405,6 +413,10 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
     finally:
         if state["actually_moved"]:
             log_move_operation(state["actually_moved"], destination)
+            if remove_empty_folders:
+                removed, errs = remove_emptied_parents([src for src, _ in state["actually_moved"]])
+                state["empty_folders_removed"] = removed
+                state["errors"].extend(errs)
     return state
 
 def main(page: ft.Page):
@@ -514,6 +526,7 @@ def main(page: ft.Page):
         exclude_patterns=None,
         turbo_mode=True,
         min_size_bytes=0,
+        max_size_bytes=None,
         ignore_empty_files=True,
         on_scan_finished=None,
         is_phash=False,
@@ -553,6 +566,7 @@ def main(page: ft.Page):
                         exclude_patterns=exclude_patterns,
                         turbo_mode=turbo_mode,
                         min_size_bytes=min_size_bytes,
+                        max_size_bytes=max_size_bytes,
                         ignore_empty_files=ignore_empty_files
                     )
             except Exception as ex:
@@ -700,7 +714,7 @@ def main(page: ft.Page):
         main_content_container.content = results_view_instance
         page.update()
 
-    def delete_files_handler(file_entries: List[Tuple[str, int, float]], use_trash: bool = True):
+    def delete_files_handler(file_entries: List[Tuple[str, int, float]], use_trash: bool = True, remove_empty_folders: bool = False):
         """Thin UI shell over perform_delete (see the module-level pipeline)."""
         # Capture the view NOW: the worker must not act on a *different*
         # ResultsView if the user pressed Back and rescanned mid-delete.
@@ -717,7 +731,7 @@ def main(page: ft.Page):
                         except Exception:
                             pass
 
-                state = perform_delete(file_entries, use_trash, progress_callback=report)
+                state = perform_delete(file_entries, use_trash, progress_callback=report, remove_empty_folders=remove_empty_folders)
 
                 if target_view is not None:
                     target_view.operation_progress.visible = False
@@ -731,6 +745,8 @@ def main(page: ft.Page):
 
             msg = get_text("deleted_count", current_language).format(state["deleted_count"])
             msg += "\n" + get_text("deleted_space_freed", current_language).format(format_file_size(state["total_freed"]))
+            if state["empty_folders_removed"]:
+                msg += "\n" + get_text("empty_folders_removed_count", current_language).format(state["empty_folders_removed"])
             if state["errors"]:
                 msg += "\n\n" + get_text("dlg_errors_list") + ":\n" + "\n".join(state["errors"][:5])
 
@@ -800,7 +816,7 @@ def main(page: ft.Page):
 
         page.run_thread(_worker)
 
-    def move_files_handler(file_entries: List[Tuple[str, int, float]], destination: str):
+    def move_files_handler(file_entries: List[Tuple[str, int, float]], destination: str, remove_empty_folders: bool = False):
         """Thin UI shell over perform_move — the reversible alternative to
         deletion (round 2 / stage 4c)."""
         target_view = results_view_instance
@@ -816,7 +832,7 @@ def main(page: ft.Page):
                         except Exception:
                             pass
 
-                state = perform_move(file_entries, destination, progress_callback=report)
+                state = perform_move(file_entries, destination, progress_callback=report, remove_empty_folders=remove_empty_folders)
 
                 if target_view is not None:
                     target_view.operation_progress.visible = False
@@ -830,6 +846,8 @@ def main(page: ft.Page):
 
             msg = get_text("move_success_msg", current_language).format(state["moved_count"])
             msg += "\n" + get_text("moved_to", current_language).format(destination)
+            if state["empty_folders_removed"]:
+                msg += "\n" + get_text("empty_folders_removed_count", current_language).format(state["empty_folders_removed"])
             if state["errors"]:
                 msg += "\n\n" + get_text("dlg_errors_list") + ":\n" + "\n".join(state["errors"][:5])
 
@@ -859,14 +877,20 @@ def main(page: ft.Page):
     def build_history_tab():
         history = load_history()
         if not history:
-            return ft.Container(
-                content=ft.Column([
-                    ft.Icon(ft.Icons.HISTORY_ROUNDED, size=48, color=TEXT_MUTED),
-                    ft.Text(get_text("no_history", current_language), size=14, color=TEXT_MUTED),
-                ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                alignment=ft.Alignment.CENTER,
-                expand=True
-            )
+            return ft.Column([
+                get_header_row(
+                    title=get_text("history", current_language),
+                    subtitle=get_text("history_desc", current_language)
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.Icons.HISTORY_ROUNDED, size=48, color=TEXT_MUTED),
+                        ft.Text(get_text("no_history", current_language), size=14, color=TEXT_MUTED),
+                    ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    alignment=ft.Alignment.CENTER,
+                    expand=True
+                )
+            ], spacing=16, expand=True)
 
         total_analyzed = sum(item.get("wasted", 0) for item in history)
         history_items = []
@@ -892,7 +916,7 @@ def main(page: ft.Page):
                     ft.Row([
                         ft.Container(
                             content=ft.Icon(ft.Icons.SCHEDULE_ROUNDED, color=PRIMARY_COLOR, size=20),
-                            bgcolor=f"{PRIMARY_COLOR}18",
+                            bgcolor=tint(PRIMARY_COLOR, "18"),
                             border_radius=8,
                             padding=8
                         ),
@@ -959,7 +983,7 @@ def main(page: ft.Page):
             op_row_controls = [
                 ft.Container(
                     content=ft.Icon(op_icon, color=op_color, size=16),
-                    bgcolor=f"{op_color}18",
+                    bgcolor=tint(op_color, "18"),
                     border_radius=6,
                     padding=6
                 ),
@@ -1128,27 +1152,31 @@ def main(page: ft.Page):
                     # Windows Explorer Context Menu
                     ft.Text(get_text("context_menu_section", current_language), size=13, weight=ft.FontWeight.W_600, color=TEXT_PRIMARY),
                     context_status_text,
-                    get_outlined_button(
-                        text=get_text("remove_context_menu_btn" if is_registered else "add_context_menu_btn", current_language),
-                        on_click=toggle_context_menu,
-                        icon=ft.Icons.APPS_OUTLINED if not is_registered else ft.Icons.DELETE_OUTLINE_ROUNDED,
-                        border_color=DANGER_COLOR if is_registered else PRIMARY_COLOR,
-                        color=DANGER_COLOR if is_registered else PRIMARY_COLOR,
-                        height=36
-                    ),
+                    ft.Row([
+                        get_outlined_button(
+                            text=get_text("remove_context_menu_btn" if is_registered else "add_context_menu_btn", current_language),
+                            on_click=toggle_context_menu,
+                            icon=ft.Icons.APPS_OUTLINED if not is_registered else ft.Icons.DELETE_OUTLINE_ROUNDED,
+                            border_color=DANGER_COLOR if is_registered else PRIMARY_COLOR,
+                            color=DANGER_COLOR if is_registered else PRIMARY_COLOR,
+                            height=36
+                        )
+                    ]),
                     ft.Divider(color=BORDER_COLOR, height=20),
 
                     # SQLite Cache section
                     ft.Text(get_text("cache_section", current_language), size=13, weight=ft.FontWeight.W_600, color=TEXT_PRIMARY),
                     cache_label,
-                    get_outlined_button(
-                        text=get_text("clear_cache_btn", current_language),
-                        on_click=on_clear_cache,
-                        icon=ft.Icons.CLEANING_SERVICES_ROUNDED,
-                        border_color=WARNING_COLOR,
-                        color=WARNING_COLOR,
-                        height=36
-                    )
+                    ft.Row([
+                        get_outlined_button(
+                            text=get_text("clear_cache_btn", current_language),
+                            on_click=on_clear_cache,
+                            icon=ft.Icons.CLEANING_SERVICES_ROUNDED,
+                            border_color=WARNING_COLOR,
+                            color=WARNING_COLOR,
+                            height=36
+                        )
+                    ])
                 ], spacing=10),
                 padding=20
             )
@@ -1240,8 +1268,8 @@ def main(page: ft.Page):
                         expand=True
                     )
                 ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                bgcolor=f"{theme['PRIMARY_COLOR']}1C" if is_selected else "transparent",
-                border=ft.Border.all(1, f"{theme['PRIMARY_COLOR']}44") if is_selected else ft.Border.all(1, "transparent"),
+                bgcolor=tint(theme['PRIMARY_COLOR'], "1C") if is_selected else "transparent",
+                border=ft.Border.all(1, tint(theme['PRIMARY_COLOR'], "44")) if is_selected else ft.Border.all(1, "transparent"),
                 border_radius=10,
                 padding=ft.Padding.symmetric(horizontal=8, vertical=9),
                 on_click=lambda _, i=idx: on_nav_change(i),
@@ -1262,7 +1290,7 @@ def main(page: ft.Page):
                             shadow=ft.BoxShadow(
                                 blur_radius=8,
                                 spread_radius=0,
-                                color=f"{theme['PRIMARY_COLOR']}55",
+                                color=tint(theme['PRIMARY_COLOR'], "55"),
                                 offset=ft.Offset(0, 2)
                             )
                         ),

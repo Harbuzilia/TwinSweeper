@@ -8,6 +8,7 @@ from sweeper import (
     find_broken_shortcuts,
     find_empty_directories,
     find_junk_files,
+    remove_emptied_parents,
     resolve_windows_shortcut_target,
 )
 
@@ -345,3 +346,41 @@ class TestNestedEmptyDirectoryDeletion:
         assert count == len(found)
         assert errors == []
         assert not root.exists()
+
+
+class TestRemoveEmptiedParents:
+    """Round 4: folders left empty by a delete/move are removed — os.rmdir
+    only, so a folder that still holds anything is always left alone."""
+
+    def test_empty_parent_removed(self, tmp_path):
+        sub = tmp_path / "gone"
+        sub.mkdir()
+        f = sub / "dup.bin"
+        f.write_bytes(b"x")
+        f.unlink()
+        removed, errors = remove_emptied_parents([str(f)])
+        assert removed == 1
+        assert errors == []
+        assert not sub.exists()
+
+    def test_non_empty_parent_kept(self, tmp_path):
+        sub = tmp_path / "kept"
+        sub.mkdir()
+        (sub / "other.bin").write_bytes(b"y")
+        removed, errors = remove_emptied_parents([str(sub / "deleted.bin")])
+        assert removed == 0
+        assert errors == []
+        assert sub.exists()
+
+    def test_duplicate_parents_removed_once(self, tmp_path):
+        sub = tmp_path / "once"
+        sub.mkdir()
+        removed, errors = remove_emptied_parents([str(sub / "a.bin"), str(sub / "b.bin")])
+        assert removed == 1
+        assert errors == []
+        assert not sub.exists()
+
+    def test_missing_parent_is_not_an_error(self, tmp_path):
+        removed, errors = remove_emptied_parents([str(tmp_path / "no_such_dir" / "file.bin")])
+        assert removed == 0
+        assert errors == []

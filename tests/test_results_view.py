@@ -11,6 +11,7 @@ Data-safety: view models only — no real files are touched at all.
 import os
 import time
 
+import flet as ft
 import pytest
 
 from scanner import FileInfo
@@ -325,7 +326,7 @@ class TestMoveProtectsOriginal:
         g = [make_info(str(tmp_path / "a0.bin"), 10),
              make_info(str(tmp_path / "a1.bin"), 10)]
         moves = []
-        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append((entries, dest)))
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: moves.append((entries, dest)))
         view.selected_paths = {g[0].path, g[1].path}  # user selected ALL
 
         view._do_move(str(tmp_path / "dest"))
@@ -342,7 +343,7 @@ class TestMoveProtectsOriginal:
              make_info(str(tmp_path / "a1.bin"), 10),
              make_info(str(tmp_path / "a2.bin"), 10)]
         moves = []
-        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append(entries))
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: moves.append(entries))
         view.selected_paths = {g[2].path}  # only one, original safe
 
         view._do_move(str(tmp_path / "dest"))
@@ -450,6 +451,84 @@ class TestExportFormats:
             view.write_export_file(str(tmp_path), "txt")
         # Swallowed for the UI, but it MUST surface in the log.
         assert any("Export error" in r.message for r in caplog.records)
+
+
+class TestRemoveEmptyFoldersOption:
+    """Round 4: 'Remove emptied folders' is opt-in (default off) in both the
+    delete and the move confirm dialogs, and its value reaches the callbacks."""
+
+    @staticmethod
+    def _fake_page():
+        class FakePage:
+            def __init__(self):
+                self.dialogs = []
+
+            def show_dialog(self, d):
+                self.dialogs.append(d)
+
+            def pop_dialog(self):
+                return self.dialogs.pop() if self.dialogs else None
+
+        return FakePage()
+
+    @staticmethod
+    def _remove_empty_checkbox(dialog):
+        """The new checkbox — identified by its tooltip, not by position
+        (warning banners may be inserted into the same content column)."""
+        return next(c for c in dialog.content.controls if isinstance(c, ft.Checkbox) and c.tooltip)
+
+    def test_delete_dialog_default_off_and_forwarded(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_delete=lambda *a, **k: calls.append(k))
+        view.selected_paths = {g[1].path}
+        page = self._fake_page()
+        view._page_or_none = lambda: page
+
+        view.on_delete_clicked(None)
+        dialog = page.dialogs[0]
+        assert self._remove_empty_checkbox(dialog).value is False  # opt-in
+
+        dialog.actions[-1].on_click(None)  # confirm
+        assert len(calls) == 1
+        assert calls[0].get("remove_empty_folders") is False
+
+    def test_delete_dialog_checked_flag_forwarded(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_delete=lambda *a, **k: calls.append(k))
+        view.selected_paths = {g[1].path}
+        page = self._fake_page()
+        view._page_or_none = lambda: page
+
+        view.on_delete_clicked(None)
+        dialog = page.dialogs[0]
+        self._remove_empty_checkbox(dialog).value = True
+
+        dialog.actions[-1].on_click(None)
+        assert calls[0].get("remove_empty_folders") is True
+
+    def test_move_forwards_remove_empty_flag(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: calls.append(kw))
+        view.selected_paths = {g[1].path}
+
+        view._do_move(str(tmp_path / "dest"), remove_empty=True)
+        assert calls == [{"remove_empty_folders": True}]
+
+    def test_move_default_flag_is_off(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: calls.append(kw))
+        view.selected_paths = {g[1].path}
+
+        view._do_move(str(tmp_path / "dest"))
+        assert calls == [{"remove_empty_folders": False}]
 
 
 class TestSearchDebounce:

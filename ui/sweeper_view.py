@@ -77,6 +77,9 @@ class SweeperView(ft.Column):
 
         self.progress_bar = ft.ProgressBar(value=None, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.status_text = ft.Text("", size=13, color=TEXT_SECONDARY)
+        # Hidden while idle: a lone icon above the "Start scan" button read as
+        # a stray glyph (the progress card keeps its layout when empty).
+        self.status_icon = ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, size=18, color=PRIMARY_COLOR, visible=False)
 
         self.results_column = ft.Column(spacing=6)
         self.load_more_btn = get_outlined_button(
@@ -133,9 +136,9 @@ class SweeperView(ft.Column):
         ]
 
         mode_options = [
-            ("empty_folders", f"📁 {get_text('empty_folders_tab', self.language)}", None),
-            ("broken_shortcuts", f"🔗 {get_text('broken_shortcuts_tab', self.language)}", None),
-            ("junk_files", f"🗑️ {get_text('junk_files_tab', self.language)}", None),
+            ("empty_folders", get_text('empty_folders_tab', self.language), ft.Icons.FOLDER_OFF_OUTLINED),
+            ("broken_shortcuts", get_text('broken_shortcuts_tab', self.language), ft.Icons.LINK_OFF_ROUNDED),
+            ("junk_files", get_text('junk_files_tab', self.language), ft.Icons.DELETE_SWEEP_OUTLINED),
         ]
 
         self.controls = [
@@ -166,7 +169,7 @@ class SweeperView(ft.Column):
                         ft.Text(get_text("selected_folders", self.language), size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                         get_badge(f"{len(self.selected_directories)}", color=PRIMARY_COLOR),
                         ft.Container(expand=True),
-                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                     ]),
                     self.folders_container if self.selected_directories else self.folders_empty_hint
                 ], spacing=10)
@@ -183,7 +186,7 @@ class SweeperView(ft.Column):
 
             # Action & Progress Card
             get_progress_card(
-                status_icon=ft.Icon(ft.Icons.CLEANING_SERVICES_ROUNDED, size=18, color=PRIMARY_COLOR),
+                status_icon=self.status_icon,
                 status_text=self.status_text,
                 progress_bar=self.progress_bar,
                 primary_action_btn=ft.Row([self.scan_button, self.cancel_button], spacing=8),
@@ -256,6 +259,7 @@ class SweeperView(ft.Column):
         self._scan_busy = True
         self.cancel_flag[0] = False
         self.progress_bar.visible = True
+        self.status_icon.visible = True
         self.status_text.value = get_text("scanning", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.results_column.controls.clear()
@@ -300,6 +304,7 @@ class SweeperView(ft.Column):
         """The scan workers have always checked cancel_flag — this button is
         what finally sets it from the UI."""
         self.cancel_flag[0] = True
+        self.status_icon.visible = False
         self.status_text.value = get_text("scan_cancelled", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.cancel_button.visible = False
@@ -320,6 +325,7 @@ class SweeperView(ft.Column):
 
     def render_sweep_results(self):
         self.progress_bar.visible = False
+        self.status_icon.visible = False
         self.status_text.value = ""
         self.scan_button.visible = True
         self.cancel_button.visible = False

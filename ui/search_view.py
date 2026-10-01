@@ -1,7 +1,7 @@
 import flet as ft
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives,
+    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives, tint,
     PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, WARNING_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
@@ -98,6 +98,8 @@ class SearchView(ft.Column):
             label=get_text("exclude_filters", self.language),
             hint_text=get_text("exclude_filters_hint", self.language),
             border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
             bgcolor=SURFACE_HOVER,
             text_size=13,
             expand=True
@@ -109,6 +111,21 @@ class SearchView(ft.Column):
             value="0",
             width=160,
             border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
+            bgcolor=SURFACE_HOVER,
+            text_size=13,
+            keyboard_type=ft.KeyboardType.NUMBER
+        )
+
+        self.max_size_field = ft.TextField(
+            label=get_text("max_size_filter", self.language),
+            hint_text="0",
+            value="0",
+            width=160,
+            border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
             bgcolor=SURFACE_HOVER,
             text_size=13,
             keyboard_type=ft.KeyboardType.NUMBER
@@ -121,8 +138,8 @@ class SearchView(ft.Column):
             chip_controls.append(
                 ft.Container(
                     content=ft.Text(f"+ {pat}", size=11, color=PRIMARY_COLOR, weight=ft.FontWeight.W_600),
-                    bgcolor=f"{PRIMARY_COLOR}15",
-                    border=ft.Border.all(1, f"{PRIMARY_COLOR}40"),
+                    bgcolor=tint(PRIMARY_COLOR, "15"),
+                    border=ft.Border.all(1, tint(PRIMARY_COLOR, "40")),
                     border_radius=12,
                     padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                     on_click=lambda _, p=pat: self.add_quick_exclude(p),
@@ -144,7 +161,7 @@ class SearchView(ft.Column):
                 ft.Divider(color=BORDER_COLOR),
                 ft.Row([self.check_turbo, self.check_ignore_empty], wrap=True),
                 ft.Divider(color=BORDER_COLOR),
-                ft.Row([self.exclude_field, self.min_size_field]),
+                ft.Row([self.exclude_field, self.min_size_field, self.max_size_field]),
                 self.quick_chips_row
             ], spacing=10),
             visible=False
@@ -313,7 +330,7 @@ class SearchView(ft.Column):
                         ft.Text(get_text("selected_folders", self.language), size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                         get_badge(f"{len(self.selected_directories)}", color=PRIMARY_COLOR),
                         ft.Container(expand=True),
-                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                     ]),
                     self.folders_container if self.selected_directories else self.folders_empty_hint
                 ], spacing=10)
@@ -452,6 +469,26 @@ class SearchView(ft.Column):
                 self.update()
                 return
 
+        # Max size (KB): 0 / empty / negative means "no upper limit".
+        max_size_bytes = None
+        if self.max_size_field.value:
+            try:
+                max_kb = int(self.max_size_field.value)
+                max_size_bytes = max_kb * 1024 if max_kb > 0 else None
+                self.max_size_field.error_text = None
+                self.max_size_field.border_color = BORDER_COLOR
+            except ValueError:
+                self.max_size_field.error_text = get_text("error_invalid_number", self.language)
+                self.max_size_field.border_color = DANGER_COLOR
+                self.update()
+                return
+        if max_size_bytes is not None and max_size_bytes < min_size_bytes:
+            # min > max would silently scan nothing — say so instead.
+            self.max_size_field.error_text = get_text("error_max_below_min", self.language)
+            self.max_size_field.border_color = DANGER_COLOR
+            self.update()
+            return
+
         self.start_button.visible = False
         self.cancel_button.visible = True
         self.progress_bar.visible = True
@@ -503,6 +540,7 @@ class SearchView(ft.Column):
             exclude_patterns=exclude_patterns,
             turbo_mode=self.check_turbo.value,
             min_size_bytes=min_size_bytes,
+            max_size_bytes=max_size_bytes,
             ignore_empty_files=self.check_ignore_empty.value,
             on_scan_finished=guarded_finished,
             is_phash=is_phash,

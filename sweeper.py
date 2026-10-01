@@ -89,6 +89,35 @@ def delete_empty_directories(folders: List[str]) -> Tuple[int, List[str]]:
 
     return deleted_count, errors
 
+def remove_emptied_parents(file_paths: List[str]) -> Tuple[int, List[str]]:
+    """Removes the immediate parent folder of every given file that is now
+    empty (dupeGuru-style "remove emptied folders" after delete/move).
+
+    Only the direct parent is considered — never a chain upward — and
+    `os.rmdir` physically cannot remove a folder that still contains
+    anything, so a parent holding other files is always left alone.
+    Duplicate parents are counted once. Returns (removed_count, errors)."""
+    removed = 0
+    errors: List[str] = []
+    seen = set()
+
+    for path in file_paths:
+        parent = os.path.dirname(path)
+        if not parent:
+            continue
+        key = os.path.normcase(parent)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+                removed += 1
+        except OSError as ex:
+            errors.append(get_text("sweep_remove_failed").format(parent, ex))
+
+    return removed, errors
+
 def resolve_windows_shortcut_target(lnk_path: str) -> Optional[str]:
     """
     Parses Windows ShellLink (.lnk) binary structure to extract target path without external dependencies.

@@ -312,3 +312,81 @@ class TestTrashAvailability:
         ops = isolated_ops_log.load_operations()
         assert len(ops) == 1 and ops[0]["type"] == "delete"
         assert len(ops[0]["paths"]) == state["deleted_count"]
+
+
+class TestRemoveEmptiedFolders:
+    """Round 4: dupeGuru-style "remove emptied folders" — opt-in cleanup of
+    folders left empty by delete/move. os.rmdir only: a folder that still
+    holds anything is never touched, and the flag defaults to off."""
+
+    def test_delete_removes_emptied_parent(self, tmp_path, isolated_ops_log):
+        sub = tmp_path / "only_here"
+        sub.mkdir()
+        f = sub / "dup.bin"
+        f.write_bytes(b"A" * 100)
+
+        state = main.perform_delete([snap(str(f))], use_trash=False, remove_empty_folders=True)
+
+        assert state["deleted_count"] == 1
+        assert state["empty_folders_removed"] == 1
+        assert not sub.exists()
+
+    def test_delete_keeps_parent_with_remaining_files(self, tmp_path, isolated_ops_log):
+        sub = tmp_path / "shared"
+        sub.mkdir()
+        victim = sub / "dup.bin"
+        victim.write_bytes(b"A" * 100)
+        keeper = sub / "keep.bin"
+        keeper.write_bytes(b"B" * 50)
+
+        state = main.perform_delete([snap(str(victim))], use_trash=False, remove_empty_folders=True)
+
+        assert state["deleted_count"] == 1
+        assert state["empty_folders_removed"] == 0
+        assert keeper.exists() and sub.exists()
+
+    def test_delete_without_flag_keeps_emptied_parent(self, tmp_path, isolated_ops_log):
+        sub = tmp_path / "untouched"
+        sub.mkdir()
+        f = sub / "dup.bin"
+        f.write_bytes(b"A" * 100)
+
+        state = main.perform_delete([snap(str(f))], use_trash=False)
+
+        assert state["deleted_count"] == 1
+        assert state["empty_folders_removed"] == 0
+        assert sub.exists()  # opt-in: default behaviour unchanged
+
+    def test_move_removes_emptied_source_dir(self, tmp_path, isolated_ops_log):
+        src = tmp_path / "src"
+        src.mkdir()
+        f = src / "a.bin"
+        f.write_bytes(b"AAA")
+        dest = tmp_path / "dest"
+
+        state = main.perform_move([snap(str(f))], str(dest), remove_empty_folders=True)
+
+        assert state["moved_count"] == 1
+        assert state["empty_folders_removed"] == 1
+        assert not src.exists()
+        assert (dest / "a.bin").exists()
+
+    def test_move_then_undo_recreates_source_folder(self, tmp_path, isolated_ops_log):
+        """Undo must restore the file even after its source folder was
+        removed — otherwise the new cleanup option would break undo."""
+        src = tmp_path / "src_undo"
+        src.mkdir()
+        f = src / "a.bin"
+        f.write_bytes(b"AAA")
+        dest = tmp_path / "dest_undo"
+
+        main.perform_move([snap(str(f))], str(dest), remove_empty_folders=True)
+        assert not src.exists()
+
+        ops = isolated_ops_log.load_operations()
+        assert ops and ops[0]["type"] == "move"
+        restored, errors = isolated_ops_log.undo_move_operation(ops[0]["id"])
+
+        assert restored == 1
+        assert errors == []
+        assert f.exists() and f.read_bytes() == b"AAA"

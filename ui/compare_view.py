@@ -43,6 +43,9 @@ class CompareView(ft.Column):
 
         self.progress_bar = ft.ProgressBar(value=None, color=PRIMARY_COLOR, bgcolor=SURFACE_HOVER, visible=False)
         self.status_text = ft.Text("", size=13, color=TEXT_SECONDARY)
+        # Hidden while idle — see sweeper_view: a lone icon above the button
+        # read as a stray glyph.
+        self.status_icon = ft.Icon(ft.Icons.COMPARE_ARROWS_ROUNDED, size=18, color=PRIMARY_COLOR, visible=False)
 
         self.results_container = ft.Column(spacing=12)
 
@@ -97,9 +100,12 @@ class CompareView(ft.Column):
                             ft.Row([
                                 ft.Icon(ft.Icons.FOLDER_SPECIAL_ROUNDED, color=PRIMARY_COLOR, size=20),
                                 ft.Text(get_text("folder_a", self.language), size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                                ft.Container(expand=True),
-                                ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=11, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + chips_a, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                             ]),
+                            # Chips on their own line: inside the title Row they
+                            # overflowed the narrow compare card and the last
+                            # chip was clipped (a wrap Row only wraps within a
+                            # bounded parent width).
+                            ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=11, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + chips_a, spacing=4, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                             get_primary_button(
                                 text=get_text("choose_folder", self.language),
                                 on_click=self.pick_folder_a,
@@ -117,9 +123,8 @@ class CompareView(ft.Column):
                             ft.Row([
                                 ft.Icon(ft.Icons.FOLDER_SPECIAL_ROUNDED, color=ACCENT_COLOR, size=20),
                                 ft.Text(get_text("folder_b", self.language), size=14, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                                ft.Container(expand=True),
-                                ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=11, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + chips_b, spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                             ]),
+                            ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=11, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + chips_b, spacing=4, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                             get_primary_button(
                                 text=get_text("choose_folder", self.language),
                                 on_click=self.pick_folder_b,
@@ -135,7 +140,7 @@ class CompareView(ft.Column):
 
             # Compare Button & Progress
             get_progress_card(
-                status_icon=ft.Icon(ft.Icons.COMPARE_ARROWS_ROUNDED, size=18, color=PRIMARY_COLOR),
+                status_icon=self.status_icon,
                 status_text=self.status_text,
                 progress_bar=self.progress_bar,
                 primary_action_btn=self.compare_button
@@ -185,6 +190,7 @@ class CompareView(ft.Column):
             return
 
         self._set_compare_busy(True)
+        self.status_icon.visible = True
         self.status_text.value = get_text("comparing", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.results_container.controls.clear()
@@ -232,6 +238,7 @@ class CompareView(ft.Column):
         hiding the progress bar and coloring the status red tells the user
         something actually went wrong."""
         self._set_compare_busy(False)
+        self.status_icon.visible = False
         self.status_text.value = message
         self.status_text.color = DANGER_COLOR
         self._safe_update()
@@ -240,6 +247,7 @@ class CompareView(ft.Column):
         if self.parent is None:
             return
         self._set_compare_busy(False)
+        self.status_icon.visible = False
         self.status_text.value = ""
         self.comparison_data = results
         # A new comparison starts on the summary tab — the previous result's
