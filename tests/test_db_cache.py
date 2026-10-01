@@ -151,6 +151,34 @@ class TestClearCacheResult:
         assert fresh_cache_db.clear_cache() is False
 
 
+class TestCloseReleasesConnection:
+    """2.2d: per-thread sqlite connections used to live until interpreter
+    GC. close() releases this thread's handle deterministically; the next
+    use transparently opens a fresh, working connection."""
+
+    def test_close_releases_and_reuse_creates_new_working_connection(self, fresh_cache_db):
+        import sqlite3
+
+        fresh_cache_db.save_file_hash(r"C:\f", 10, 1.0, full_hash="H")
+        conn = fresh_cache_db._local.conn
+        assert conn is not None
+
+        fresh_cache_db.close()
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+        assert fresh_cache_db._local.conn is None
+
+        # Reuse after close: a fresh connection is opened and works.
+        assert fresh_cache_db.get_file_hash(r"C:\f", 10, 1.0) == "H"
+        assert fresh_cache_db._local.conn is not None
+        assert fresh_cache_db._local.conn is not conn
+
+    def test_close_without_connection_is_noop(self, fresh_cache_db):
+        fresh_cache_db.close()  # this thread never opened one
+        assert fresh_cache_db.get_file_hash(r"C:\missing", 1, 1.0) is None
+
+
 class TestThreadSafety:
     def test_concurrent_writes_all_persisted(self, fresh_cache_db):
         n_threads, n_writes = 8, 25

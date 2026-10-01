@@ -561,6 +561,9 @@ def main(page: ft.Page):
             finally:
                 if on_scan_finished:
                     on_scan_finished()
+                # 2.2d: release this worker thread's sqlite connection —
+                # per-thread handles used to live until interpreter GC.
+                cache_db.close()
 
             if run_cancel[0]:
                 progress_callback(get_text("scan_cancelled", current_language), None)
@@ -627,6 +630,9 @@ def main(page: ft.Page):
             finally:
                 if on_scan_finished:
                     on_scan_finished()
+                # 2.2d: release this worker thread's sqlite connection (see
+                # run_scan above).
+                cache_db.close()
 
             if run_cancel[0]:
                 progress_callback(get_text("scan_cancelled", current_language), None)
