@@ -184,21 +184,35 @@ class CompareView(ft.Column):
             self._safe_update()
             return
 
-        self._compare_busy = True
-        self.compare_button.visible = False
-        self.progress_bar.visible = True
+        self._set_compare_busy(True)
         self.status_text.value = get_text("comparing", self.language)
         self.status_text.color = TEXT_SECONDARY
         self.results_container.controls.clear()
         self._safe_update()
 
-        self.on_compare_start(
-            self.folder_a,
-            self.folder_b,
-            self.show_results,
-            self.update_status,
-            self.show_error
-        )
+        try:
+            self.on_compare_start(
+                self.folder_a,
+                self.folder_b,
+                self.show_results,
+                self.update_status,
+                self.show_error
+            )
+        except Exception as ex:
+            # The worker never launched (run_thread/startup failure): fall
+            # back to the error state so the view is not locked with a
+            # hidden Compare button (2.2e).
+            self.show_error(str(ex))
+
+    def _set_compare_busy(self, busy: bool):
+        """The single owner of the compare busy state (2.2e): the flag, the
+        Compare button and the progress bar always flip together. The reset
+        used to be duplicated in show_error and show_results — any new busy
+        control had to be wired in two places, and a path that forgot one
+        of them left the view locked."""
+        self._compare_busy = busy
+        self.compare_button.visible = not busy
+        self.progress_bar.visible = busy
 
     def _safe_update(self):
         """Headless/unmounted-safe update — flet's Control.page raises
@@ -217,9 +231,7 @@ class CompareView(ft.Column):
         """A failed comparison is an error state, not an empty result —
         hiding the progress bar and coloring the status red tells the user
         something actually went wrong."""
-        self._compare_busy = False
-        self.compare_button.visible = True
-        self.progress_bar.visible = False
+        self._set_compare_busy(False)
         self.status_text.value = message
         self.status_text.color = DANGER_COLOR
         self._safe_update()
@@ -227,9 +239,7 @@ class CompareView(ft.Column):
     def show_results(self, results: dict):
         if self.parent is None:
             return
-        self._compare_busy = False
-        self.compare_button.visible = True
-        self.progress_bar.visible = False
+        self._set_compare_busy(False)
         self.status_text.value = ""
         self.comparison_data = results
         # A new comparison starts on the summary tab — the previous result's

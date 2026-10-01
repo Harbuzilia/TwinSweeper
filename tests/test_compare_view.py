@@ -98,6 +98,24 @@ class TestCompareBusyGuard:
         assert view._compare_busy is False
         assert view.compare_button.visible is True
 
+    def test_worker_launch_failure_resets_busy(self, tmp_path):
+        """2.2e: if on_compare_start itself raises (the worker never
+        launched), the view must fall back to the error state — the busy
+        flag used to stay set with the Compare button hidden forever."""
+        def exploding_start(a, b, result_cb, progress_cb, error_cb=None):
+            raise RuntimeError("run_thread failed")
+
+        view = CompareView(on_compare_start=exploding_start, language="ru")
+        view.folder_a = str(tmp_path)
+        view.folder_b = str(tmp_path)
+
+        view.start_compare(None)  # must not raise
+
+        assert view._compare_busy is False
+        assert view.compare_button.visible is True
+        assert view.progress_bar.visible is False
+        assert "run_thread failed" in view.status_text.value
+
 
 class TestResultsPagination:
     """2.1a: folder-compare results rendered one Control per file — a real
