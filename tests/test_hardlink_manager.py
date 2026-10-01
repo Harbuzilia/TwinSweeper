@@ -3,7 +3,9 @@ import os
 
 import pytest
 
+import hardlink_manager
 from hardlink_manager import batch_replace_with_hardlinks, is_same_volume, replace_with_hardlink
+from scanner import get_file_hash as real_get_file_hash
 
 
 def make_pair(tmp_path, content=b"identical content" * 100):
@@ -165,6 +167,71 @@ class TestBatchReplaceWithHardlinks:
         assert os.path.samefile(str(original), str(good))
         with open(bad, "rb") as f:
             assert f.read() == b"WRONG" * 100
+
+    def test_original_hashed_once_per_group_m5(self, tmp_path, monkeypatch):
+        """M5: in a group of 1 original + 5 duplicates the original is hashed
+        once (group-level cache) instead of once per pair: 1 + 5 = 6
+        get_file_hash calls, not 2 * 5 = 10. The duplicates are always hashed
+        fresh — they are the files being replaced."""
+        original = tmp_path / "orig.bin"
+        original.write_bytes(b"PAYLOAD" * 100)
+        dups = []
+        for i in range(5):
+            d = tmp_path / f"dup{i}.bin"
+            d.write_bytes(b"PAYLOAD" * 100)
+            dups.append(str(d))
+
+        calls = []
+
+        def counting_get_file_hash(path, *args, **kwargs):
+            calls.append(str(path))
+            return real_get_file_hash(path, *args, **kwargs)
+
+        monkeypatch.setattr(hardlink_manager, "get_file_hash", counting_get_file_hash)
+
+        success, freed, errors, succeeded = batch_replace_with_hardlinks({str(original): dups})
+
+        assert success == 5
+        assert errors == []
+        assert len(calls) == 6  # 1 original (cached for the group) + 5 duplicates
+
+    def test_original_rewritten_after_group_hash_not_trusted_m5(self, tmp_path, monkeypatch):
+        """M5 invariant: the cached original hash is reused only while its
+        stat (size + mtime) is unchanged. Rewriting the original right after
+        its group hash was computed invalidates the cache: the hash is
+        recomputed, the pair no longer matches and the replacement is
+        refused — the duplicate's data survives."""
+        original = tmp_path / "orig.bin"
+        original.write_bytes(b"OLD" * 100)
+        duplicate = tmp_path / "dup.bin"
+        duplicate.write_bytes(b"OLD" * 100)
+
+        calls = []
+
+        def rewriting_get_file_hash(path, *args, **kwargs):
+            result = real_get_file_hash(path, *args, **kwargs)
+            calls.append(str(path))
+            if str(path) == str(original) and len(calls) == 1:
+                # Substitute the original right after its hash was cached:
+                # same size, but a deterministically different mtime.
+                with open(original, "wb") as f:
+                    f.write(b"NEW" * 100)
+                os.utime(original, ns=(10**9, 10**9))
+            return result
+
+        monkeypatch.setattr(hardlink_manager, "get_file_hash", rewriting_get_file_hash)
+
+        success, freed, errors, succeeded = batch_replace_with_hardlinks(
+            {str(original): [str(duplicate)]}
+        )
+
+        assert success == 0  # refused: a stale hash must not green-light the pair
+        # The duplicate keeps its own data and is not linked to the changed original.
+        with open(duplicate, "rb") as f:
+            assert f.read() == b"OLD" * 100
+        assert not os.path.samefile(str(original), str(duplicate))
+        # The original's hash was recomputed (group hash + revalidation miss).
+        assert calls.count(str(original)) == 2
 
 
 class TestAlreadyLinkedNotJournaled:
