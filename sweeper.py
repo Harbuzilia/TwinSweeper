@@ -1,7 +1,8 @@
 import os
 import struct
 from typing import List, Dict, Tuple, Optional, Callable
-from scanner import FileInfo, is_system_path
+from scanner import FileInfo
+from fs_filters import is_system_path, prune_dirs
 from locales import get_text
 
 JUNK_EXTENSIONS = {".tmp", ".bak", ".old", ".dmp", ".log", ".gid", ".chk"}
@@ -27,8 +28,19 @@ def find_empty_directories(
         if not os.path.exists(directory):
             continue
 
-        # Walk bottom-up so leaf directories are inspected first
-        for root, dirs, files in os.walk(directory, topdown=False, followlinks=False):
+        # Collect the tree top-down WITH pruning (M2/M3): system locations
+        # and junctions are never entered, so a junction node is not even
+        # walked as a folder. Nodes are then inspected deepest-first — the
+        # same bottom-up result order the previous topdown=False walk gave,
+        # so nested empty trees still collapse in a single pass.
+        nodes = []
+        for root, dirs, _files in os.walk(directory, topdown=True, followlinks=False):
+            if cancel_flag and cancel_flag[0]:
+                return empty_folders
+            prune_dirs(root, dirs)
+            nodes.append(root)
+
+        for root in reversed(nodes):
             if cancel_flag and cancel_flag[0]:
                 return empty_folders
 
@@ -154,9 +166,12 @@ def find_broken_shortcuts(
     for directory in directories:
         if not os.path.exists(directory):
             continue
-        for root, _, filenames in os.walk(directory, followlinks=False):
+        for root, dirs, filenames in os.walk(directory, followlinks=False):
             if cancel_flag and cancel_flag[0]:
                 return broken
+
+            # Shared system-location/junction pruning (see fs_filters).
+            prune_dirs(root, dirs)
 
             for filename in filenames:
                 if filename.lower().endswith(".lnk"):
@@ -200,9 +215,12 @@ def find_junk_files(
     for directory in directories:
         if not os.path.exists(directory):
             continue
-        for root, _, filenames in os.walk(directory, followlinks=False):
+        for root, dirs, filenames in os.walk(directory, followlinks=False):
             if cancel_flag and cancel_flag[0]:
                 return junk
+
+            # Shared system-location/junction pruning (see fs_filters).
+            prune_dirs(root, dirs)
 
             for filename in filenames:
                 scanned += 1

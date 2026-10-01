@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 
 from scanner import FileInfo, long_path
+from fs_filters import InodeDeduper, prune_dirs
 from db_cache import cache_db
 from locales import get_text
 
@@ -113,6 +114,9 @@ def scan_similar_images(
     report(get_text("phash_discovering"), 0.0)
     image_files: List[FileInfo] = []
     skipped_unsupported: set = set()
+    # One physical image must never be indexed twice: a hardlink/junction
+    # alias would appear as a "similar copy" of itself (M2/M3).
+    inode_dedup = InodeDeduper()
 
     for directory in directories:
         if is_cancelled() or not os.path.exists(directory):
@@ -120,6 +124,9 @@ def scan_similar_images(
         for root, dirs, filenames in os.walk(directory, followlinks=False):
             if is_cancelled():
                 return {}
+            # Shared system-location/junction pruning (see fs_filters) so the
+            # walker never enters them; user exclude patterns prune on top.
+            prune_dirs(root, dirs)
             # Prune excluded directories so the walker never descends into them.
             if exclude_patterns:
                 dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
@@ -134,6 +141,10 @@ def scan_similar_images(
                     continue
                 try:
                     stat = os.stat(filepath)
+                    # Skip an image already indexed under another path
+                    # (hardlink / junction alias / overlapping root).
+                    if inode_dedup.already_seen(stat):
+                        continue
                     if stat.st_size > 0:
                         image_files.append(FileInfo(
                             path=filepath,

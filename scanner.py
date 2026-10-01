@@ -8,6 +8,12 @@ from typing import List, Dict, Optional, Callable, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_cache import cache_db
+from fs_filters import (
+    InodeDeduper,
+    inode_key,
+    is_system_path as is_system_path,  # re-export: sweeper/results_view import it from scanner
+    prune_dirs,
+)
 from locales import get_text
 
 try:
@@ -132,72 +138,8 @@ def verify_file_unchanged(path: str, expected_size: int, expected_mtime: float) 
         return False, get_text("verify_failed_mtime")
     return True, ""
 
-# Known system locations matched as whole path components, never as substrings
-# (M2: substring matching flagged paths like E:\bootcamp\notes.txt).
-_ROOT_LEVEL_SYSTEM_DIRS = {
-    "$recycle.bin", "system volume information", "$windows.~bt", "$windows.~ws",
-    "recovery", "boot", "config.msi", "msocache", "windows",
-    "program files", "program files (x86)", "programdata",
-}
-_SYSTEM_DIR_COMPONENTS = {"system32", "syswow64", "winsxs"}
-
-# Locations pruned from EVERY scan regardless of user exclude patterns: a
-# deleted file's copy in the Recycle Bin keeps the original's mtime, so it
-# would otherwise be grouped with the live file and — being older — win the
-# "original/keep" slot, marking the real file as the deletable "duplicate".
-_ALWAYS_EXCLUDED_DIRS = {"$recycle.bin", "system volume information"}
-
-
-def _system_roots() -> List[str]:
-    """Real system root paths from the environment plus common fallbacks.
-
-    Computed per call so tests (and unusual setups) can override via env vars.
-    """
-    roots = []
-    for var in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"):
-        value = os.environ.get(var)
-        if value:
-            roots.append(os.path.normcase(os.path.abspath(value)))
-    roots.extend([
-        r"c:\windows",
-        r"c:\program files",
-        r"c:\program files (x86)",
-        r"c:\programdata",
-    ])
-    return roots
-
-
-def is_system_path(path: str) -> bool:
-    """Checks if the path belongs to a protected Windows system directory or file.
-
-    Component-based matching (M2): a path is system when its first directory
-    component is a known system folder (on any drive), when any component is a
-    system-only directory (system32/winsxs/...), or when it lives under a real
-    system root taken from the environment. User files merely named like system
-    paths (E:\\bootcamp\\notes.txt, E:\\Games\\mod.dll) are NOT flagged.
-    """
-    try:
-        norm = os.path.normcase(os.path.abspath(path))
-    except (OSError, ValueError):
-        return False
-
-    parts = norm.split(os.sep)
-    if parts and parts[0].endswith(":"):
-        parts = parts[1:]
-    parts = [p for p in parts if p]
-    if not parts:
-        return False
-
-    if parts[0] in _ROOT_LEVEL_SYSTEM_DIRS:
-        return True
-    if any(p in _SYSTEM_DIR_COMPONENTS for p in parts):
-        return True
-
-    for root in _system_roots():
-        if norm == root or norm.startswith(root + os.sep):
-            return True
-
-    return False
+# System-location matching, walk pruning and physical-file (inode) dedup now
+# live in fs_filters.py — the shared rules every scanner must agree on.
 
 def compare_byte_by_byte(file1: str, file2: str, buffer_size: int = 65536) -> bool:
     """Compares two files byte by byte. Returns True if identical."""
@@ -275,9 +217,8 @@ def scan_directory(
     # junction/symlink aliases and overlapping scan roots (C:\ together with
     # C:\Users) all resolve to the same (device, inode); grouping such a pair
     # as "duplicates" would let the user delete a file and thereby destroy the
-    # very "original" it pointed at (round 3). Guarded by st_ino != 0 because
-    # FAT/exFAT report inode 0 for every file.
-    seen_inodes = set()
+    # very "original" it pointed at (round 3).
+    inode_dedup = InodeDeduper()
 
     # Phase 1: File discovery & size indexing
     report_progress(get_text("scan_phase_indexing"), 0.0)
@@ -290,16 +231,9 @@ def scan_directory(
         for root, dirs, filenames in os.walk(directory, topdown=True, followlinks=False):
             if is_cancelled():
                 return {}
-            # Prune always-junk system locations: a copy sitting in
-            # $Recycle.Bin must never become the "original" that a live file
-            # is compared against. followlinks=False does NOT stop Windows
-            # junctions, so prune those explicitly — they cause double-walks
-            # and even infinite loops.
-            dirs[:] = [
-                d for d in dirs
-                if d.lower() not in _ALWAYS_EXCLUDED_DIRS
-                and not os.path.isjunction(os.path.join(root, d))  # Python 3.12+ (os.path.isjunction)
-            ]
+            # System locations and junctions are pruned from every walk —
+            # the shared rules live in fs_filters (M2/M3).
+            prune_dirs(root, dirs)
             if exclude_patterns:
                 dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
 
@@ -321,11 +255,8 @@ def scan_directory(
 
                     # Skip a file we already indexed under another path
                     # (hardlink / junction alias / overlapping root).
-                    if stat.st_ino:
-                        file_id = (stat.st_dev, stat.st_ino)
-                        if file_id in seen_inodes:
-                            continue
-                        seen_inodes.add(file_id)
+                    if inode_dedup.already_seen(stat):
+                        continue
 
                     info = FileInfo(
                         path=filepath,
@@ -554,7 +485,7 @@ def scan_for_sample(
     # Exclude the sample's OWN aliases (hardlink / junction) by physical file
     # identity, not just by path string — otherwise a reported "copy" could be
     # the sample itself under another path, and deleting it destroys the sample.
-    sample_ino = (sample_stat.st_dev, sample_stat.st_ino) if sample_stat.st_ino else None
+    sample_key = inode_key(sample_stat)
 
     for directory in search_directories:
         if not os.path.exists(directory):
@@ -562,13 +493,10 @@ def scan_for_sample(
         for root, dirs, filenames in os.walk(directory, followlinks=False):
             if cancel_flag and cancel_flag[0]:
                 return found_files
-            # Same pruning as scan_directory: never index the Recycle Bin or
-            # descend into junctions (double-count / infinite loop).
-            dirs[:] = [
-                d for d in dirs
-                if d.lower() not in _ALWAYS_EXCLUDED_DIRS
-                and not os.path.isjunction(os.path.join(root, d))  # Python 3.12+ (os.path.isjunction)
-            ]
+            # Same pruning as scan_directory (see fs_filters): never index
+            # system locations or descend into junctions (double-count /
+            # infinite loop).
+            prune_dirs(root, dirs)
 
             for filename in filenames:
                 filepath = os.path.join(root, filename)
@@ -582,7 +510,7 @@ def scan_for_sample(
                 try:
                     stat = os.stat(filepath)
                     # Skip the sample's own hardlink/junction alias.
-                    if sample_ino and stat.st_ino and (stat.st_dev, stat.st_ino) == sample_ino:
+                    if sample_key is not None and inode_key(stat) == sample_key:
                         continue
                     if (by_size or by_hash or by_byte) and stat.st_size != sample_size:
                         # Hash or byte equality implies identical size, so

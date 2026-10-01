@@ -40,6 +40,21 @@ def make_noise_image(path, size=(256, 256), seed=42):
     return str(path)
 
 
+def make_junction(link, target):
+    """Creates a Windows junction (mklink /J); returns False when the system
+    refuses (CI without dev-mode/admin) — the caller then pytest.skips."""
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=True, capture_output=True, timeout=15,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
 class TestDHash:
     def test_returns_16_hex_chars(self, tmp_path):
         h = compute_dhash(make_gradient_image(tmp_path / "g.png"))
@@ -188,6 +203,69 @@ class TestScanSimilarImages:
         # but nothing else joins.
         assert len(results) == 1
         assert len(next(iter(results.values()))) == 3
+
+
+class TestPrunedTraversal:
+    """M2/M3: the image walk must use the shared fs_filters rules — never
+    descend into junctions or system locations, never index one physical
+    file twice."""
+
+    def test_junction_to_external_dir_not_scanned(self, tmp_path):
+        """A junction pointing OUTSIDE the scan root must not pull external
+        images into the results (pattern from tests/test_scanner.py)."""
+        external = tmp_path / "external"
+        external.mkdir()
+        make_gradient_image(external / "ext.png")
+        root = tmp_path / "root"
+        root.mkdir()
+        make_gradient_image(root / "live.png")  # would pair with ext.png via the junction
+        link = root / "link"
+        if not make_junction(link, external):
+            pytest.skip("cannot create junction on this system")
+
+        results = scan_similar_images([str(root)])
+
+        # Junction pruned → only live.png indexed → no similar pair.
+        assert results == {}
+
+    def test_recycle_bin_images_not_scanned(self, tmp_path):
+        """Pruned system location: an image inside the bin must not join a
+        group with its live copy."""
+        live = make_gradient_image(tmp_path / "live.png")
+        bin_dir = tmp_path / "$Recycle.Bin" / "S-1-5-21"
+        bin_dir.mkdir(parents=True)
+        # Same pixels as the live copy, sitting in the bin.
+        (bin_dir / "$R1A2B3C.png").write_bytes(open(live, "rb").read())
+
+        results = scan_similar_images([str(tmp_path)])
+
+        # Only the live image remains → no similar pair.
+        assert results == {}
+
+    def test_hardlink_alias_not_duplicated_in_group(self, tmp_path):
+        """One physical image reachable by two paths must yield ONE entry:
+        a hardlink alias of an original must not become a second group
+        member (deleting it would destroy the original's data)."""
+        d = tmp_path / "photos"
+        d.mkdir()
+        original = make_gradient_image(d / "orig.png")
+        alias = d / "alias.png"
+        try:
+            os.link(original, str(alias))  # real NTFS hardlink
+        except (OSError, AttributeError):
+            pytest.skip("hardlinks unsupported on this filesystem")
+        make_gradient_image(d / "copy.png")  # same content, separate physical file
+
+        results = scan_similar_images([str(d)])
+
+        # One physical file → exactly one of {orig.png, alias.png} is listed
+        # (the walk keeps the first path it met, like scanner.py does), plus
+        # the genuine copy — never all three.
+        (files,) = results.values()
+        names = {os.path.basename(f.path) for f in files}
+        assert len(names) == 2
+        assert "copy.png" in names
+        assert len(names & {"orig.png", "alias.png"}) == 1
 
 
 class TestDhashExifOrientation:
