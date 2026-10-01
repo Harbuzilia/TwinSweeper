@@ -181,17 +181,23 @@ class ScanCacheDB:
             "size_bytes": db_size
         }
 
-    def clear_cache(self):
-        """Wipe all cached hashes and vacuum database."""
+    def clear_cache(self) -> bool:
+        """Wipe all cached hashes and vacuum database.
+
+        Returns True only when the wipe actually succeeded — the caller
+        (Settings) reports success/failure based on this (2.1b: a void
+        return made the «cache cleared» dialog unconditional)."""
         try:
             conn = self._get_connection()
             with conn:
                 conn.execute("DELETE FROM file_hashes;")
                 conn.execute("DELETE FROM image_phashes;")
             conn.execute("VACUUM;")
+            return True
         except Exception as ex:
             # User-initiated action: a silent failure here would leave the user
             # convinced the cache was wiped when it was not.
             logger.warning("cache clear failed: %s", ex)
+            return False
 
 cache_db = ScanCacheDB()

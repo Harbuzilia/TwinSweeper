@@ -130,6 +130,27 @@ class TestStatsAndClear:
         assert stats["total_images"] == 0
 
 
+class TestClearCacheResult:
+    """2.1b: clear_cache must report whether the wipe actually happened —
+    the Settings dialog used to say «Cache cleared» unconditionally, even
+    when the operation failed."""
+
+    def test_clear_cache_returns_true_on_success(self, fresh_cache_db):
+        fresh_cache_db.save_file_hash(r"C:\a", 1, 1.0, full_hash="H1")
+        assert fresh_cache_db.clear_cache() is True
+        # And it really wiped:
+        assert fresh_cache_db.get_file_hash(r"C:\a", 1, 1.0) is None
+
+    def test_clear_cache_returns_false_on_failure(self, fresh_cache_db, monkeypatch):
+        import sqlite3
+
+        def broken_connection():
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(fresh_cache_db, "_get_connection", broken_connection)
+        assert fresh_cache_db.clear_cache() is False
+
+
 class TestThreadSafety:
     def test_concurrent_writes_all_persisted(self, fresh_cache_db):
         n_threads, n_writes = 8, 25

@@ -1012,13 +1012,16 @@ def main(page: ft.Page):
         )
 
         def on_clear_cache(e):
-            cache_db.clear_cache()
-            cache_label.value = get_text("cache_stats_label", current_language).format(0, 0)
-            cache_label.update()
+            cleared = cache_db.clear_cache()
+            if cleared:
+                cache_label.value = get_text("cache_stats_label", current_language).format(0, 0)
+                cache_label.update()
 
+            # 2.1b: the dialog must state the FACT — a silent clear_cache
+            # failure used to show "cache cleared" anyway.
             dlg = get_styled_dialog(
-                title=get_text("cache_cleared", current_language),
-                title_color=SUCCESS_COLOR,
+                title=get_text("cache_cleared" if cleared else "cache_clear_failed", current_language),
+                title_color=SUCCESS_COLOR if cleared else DANGER_COLOR,
                 actions=[get_primary_button(text=get_text("ok", current_language), on_click=lambda _: page.pop_dialog(), height=36)]
             )
             page.show_dialog(dlg)
