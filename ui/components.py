@@ -74,6 +74,20 @@ ACTIVE_THEME_KEY = "dark_slate"
 
 _PALETTE_KEYS = tuple(THEMES["dark_slate"].keys())
 
+# First-party modules that bind palette constants at import time via
+# ``from ui.components import PRIMARY_COLOR, ...``. A theme switch rewrites
+# exactly these bindings, by name. The old implementation matched by VALUE
+# across ALL of sys.modules and also rewrote unrelated modules that just
+# happened to hold an identical string.
+_PALETTE_CONSUMERS = (
+    "main",
+    "ui.search_view",
+    "ui.results_view",
+    "ui.compare_view",
+    "ui.sample_search_view",
+    "ui.sweeper_view",
+)
+
 def get_current_theme() -> Dict[str, str]:
     return THEMES.get(ACTIVE_THEME_KEY, THEMES["dark_slate"])
 
@@ -81,11 +95,18 @@ def get_active_theme_key() -> str:
     return ACTIVE_THEME_KEY
 
 def set_active_theme(theme_name: str):
-    """Switches the active palette and propagates new colors everywhere."""
+    """Switches the active palette and propagates the new colors.
+
+    Updates this module's aliases and the palette constants of the
+    first-party modules listed in ``_PALETTE_CONSUMERS`` (they bind the
+    constants at import time, so the switch must rewrite them explicitly;
+    main.change_theme clears view_cache so views rebuild with the new
+    colors). Modules outside that list are never touched — the old
+    value-matching scan over sys.modules silently corrupted third-party
+    modules that coincidentally held a palette string."""
     global ACTIVE_THEME_KEY
     if theme_name not in THEMES or theme_name == ACTIVE_THEME_KEY:
         return
-    old_palette = THEMES.get(ACTIVE_THEME_KEY, THEMES["dark_slate"])
     new_palette = THEMES[theme_name]
     ACTIVE_THEME_KEY = theme_name
 
@@ -93,14 +114,15 @@ def set_active_theme(theme_name: str):
     for key, value in new_palette.items():
         setattr(this_module, key, value)
 
-    for module in list(sys.modules.values()):
+    for name in _PALETTE_CONSUMERS:
+        module = sys.modules.get(name)
         if module is None or module is this_module:
             continue
         mod_dict = getattr(module, "__dict__", None)
         if not mod_dict:
             continue
         for key in _PALETTE_KEYS:
-            if mod_dict.get(key) == old_palette.get(key):
+            if key in mod_dict:
                 mod_dict[key] = new_palette[key]
 
 # Default palette aliases

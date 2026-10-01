@@ -53,6 +53,50 @@ class TestThemes:
             assert getattr(components, key) == THEMES[get_active_theme_key()][key]
 
 
+class TestSetActiveThemeIsolation:
+    """2.2c: set_active_theme used to scan ALL of sys.modules and rewrite any
+    attribute whose VALUE matched the old palette — third-party modules that
+    happened to hold the same string were silently corrupted. Only this
+    module and the first-party palette consumers may be updated."""
+
+    def test_foreign_modules_are_never_touched(self):
+        import sys
+        import types
+
+        foreign = types.ModuleType("dup_theme_probe")
+        dark = THEMES["dark_slate"]
+        # Both a palette-key-named attribute and a differently-named one
+        # hold old-palette strings: neither may be rewritten.
+        foreign.PRIMARY_COLOR = dark["PRIMARY_COLOR"]
+        foreign.MY_PAINT = dark["ACCENT_COLOR"]
+        sys.modules["dup_theme_probe"] = foreign
+        try:
+            set_active_theme("light_clean")
+            assert foreign.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+            assert foreign.MY_PAINT == dark["ACCENT_COLOR"]
+            # Switch twice — still no trace after returning to the start.
+            set_active_theme("dark_slate")
+            assert foreign.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+            assert foreign.MY_PAINT == dark["ACCENT_COLOR"]
+        finally:
+            set_active_theme("dark_slate")
+            del sys.modules["dup_theme_probe"]
+
+    def test_own_module_and_consumers_update(self):
+        import ui.search_view  # a real `from ui.components import PRIMARY_COLOR` consumer
+        dark = THEMES["dark_slate"]
+        light = THEMES["light_clean"]
+        try:
+            set_active_theme("light_clean")
+            assert components.PRIMARY_COLOR == light["PRIMARY_COLOR"]
+            assert ui.search_view.PRIMARY_COLOR == light["PRIMARY_COLOR"]
+            assert get_current_theme() is light
+        finally:
+            set_active_theme("dark_slate")
+        assert components.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+        assert ui.search_view.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+
+
 class TestFormatPathShort:
     def test_short_path_unchanged(self):
         path = os.path.join("C:", "Users", "me", "file.txt")
