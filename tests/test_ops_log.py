@@ -148,6 +148,32 @@ class TestUndoHardlink:
         with open(original, "rb") as f1, open(duplicate, "rb") as f2:
             assert f1.read() == f2.read()
 
+    def test_undo_recreates_deleted_parent_folder(self, tmp_path, isolated_ops_log):
+        """2.2a: the duplicate's folder can be gone by undo time (e.g. the
+        "remove emptied folders" option ran after the linking) — undo used
+        to fail with FileNotFoundError instead of restoring the copy."""
+        original = tmp_path / "orig.bin"
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        duplicate = nested / "dup.bin"
+        content = b"content" * 50
+        original.write_bytes(content)
+        duplicate.write_bytes(content)
+        ok, err, _ = replace_with_hardlink(str(original), str(duplicate))
+        assert ok, err
+        op = isolated_ops_log.log_hardlink_operation([(str(original), str(duplicate))], 100)
+
+        os.remove(duplicate)
+        nested.rmdir()  # the folder disappeared after the operation
+
+        restored, errors = isolated_ops_log.undo_hardlink_operation(op["id"])
+
+        assert restored == 1
+        assert errors == []
+        assert duplicate.is_file()
+        with open(duplicate, "rb") as f:
+            assert f.read() == content
+
 
 class TestOpsLogConcurrencyAndAtomicity:
     """Round 2: the delete worker and the sweeper worker journal from different

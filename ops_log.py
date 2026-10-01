@@ -168,6 +168,12 @@ def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
                     # Path was recreated by the user afterwards - leave it untouched.
                     continue
             else:
+                # The duplicate's folder may have been removed after the
+                # linking (e.g. by the "remove emptied folders" option) —
+                # recreate it so undo still restores the separate copy.
+                parent = os.path.dirname(duplicate)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
                 shutil.copy2(original, duplicate)
             restored += 1
         except Exception as ex:
