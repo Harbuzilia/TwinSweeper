@@ -155,6 +155,50 @@ def compare_byte_by_byte(file1: str, file2: str, buffer_size: int = 65536) -> bo
     except (OSError, PermissionError):
         return False
 
+# M6 byte-phase reference cache. A subgroup's reference is read ONCE and
+# its content is compared against every candidate from RAM; 32 MB covers
+# the common duplicate kinds (documents, photos, audio) while capping the
+# scanner's transient memory. Oversized references fall back to streaming
+# per-candidate comparison — bounded memory beats saved I/O for giant files.
+BYTE_REFERENCE_CACHE_LIMIT = 32 * 1024 * 1024
+
+
+def load_byte_reference(path: str, size: int) -> Optional[bytes]:
+    """Reference content for one byte-phase subgroup, or None when it must
+    not be cached (M6): an oversized reference would sit wholly in RAM, and
+    an unreadable one cannot anchor any subgroup — both fall back to
+    per-candidate streaming, which keeps the old open-failure behaviour
+    (an unreadable reference matches nothing)."""
+    if size > BYTE_REFERENCE_CACHE_LIMIT:
+        return None
+    try:
+        # cap+1: a file that GREW past the cap since indexing must not be
+        # slurped into memory whole here.
+        with open(long_path(path), 'rb') as f:
+            return f.read(BYTE_REFERENCE_CACHE_LIMIT + 1)
+    except (OSError, PermissionError):
+        return None
+
+
+def content_matches_bytes(expected: bytes, path: str, buffer_size: int = 65536) -> bool:
+    """True when the file at ``path`` consists exactly of ``expected``.
+
+    Chunked with early exit at the first difference, so a non-matching
+    candidate usually costs one buffer instead of a full read — the
+    reference content has already been paid for once (M6)."""
+    try:
+        with open(long_path(path), 'rb') as f:
+            pos = 0
+            while pos < len(expected):
+                chunk = f.read(buffer_size)
+                if not chunk or expected[pos:pos + len(chunk)] != chunk:
+                    return False
+                pos += len(chunk)
+            # The candidate must end exactly where the reference ends.
+            return f.read(1) == b""
+    except (OSError, PermissionError):
+        return False
+
 def scan_directory(
     directories: List[str],
     by_name: bool = False,
@@ -412,8 +456,16 @@ def scan_directory(
 
         duplicates = {k: v for k, v in verified_grouped.items() if len(v) > 1}
 
-    # Phase 3: Byte-by-byte verification (if enabled)
-    if by_byte and duplicates:
+    # Phase 3: Byte-by-byte verification — byte-only mode (M6).
+    # With by_hash on, every group reaching this point is already proven by
+    # a FULL SHA-256: full mode hashes with SHA-256 directly, and the turbo
+    # verification block above has replaced every partial hash with a full
+    # one. Re-checking those groups byte-by-byte would repeat the same proof
+    # at ~n times the I/O. A SHA-256 collision between same-sized files is
+    # outside this project's risk model (README: full SHA-256 IS the
+    # duplicate-proof standard), so the byte pass runs only when the user
+    # asked for content proof WITHOUT hashing.
+    if by_byte and duplicates and not by_hash:
         report_progress(get_text("scan_phase_byte"), 0.9)
         final_duplicates = {}
         total_groups = len(duplicates)
@@ -426,10 +478,23 @@ def scan_directory(
             sub_idx = 0
             while remaining:
                 current = remaining.pop(0)
+                # M6: the reference is read once per subgroup and served
+                # from RAM to every candidate (see load_byte_reference for
+                # the oversized fallback).
+                ref_content = load_byte_reference(current.path, current.size)
                 matched = [current]
                 unmatched = []
                 for other in remaining:
-                    if compare_byte_by_byte(current.path, other.path):
+                    # Equal content implies equal size — skip the I/O for
+                    # size-mismatched candidates outright.
+                    if other.size != current.size:
+                        unmatched.append(other)
+                        continue
+                    if ref_content is not None:
+                        is_same = content_matches_bytes(ref_content, other.path)
+                    else:
+                        is_same = compare_byte_by_byte(current.path, other.path)
+                    if is_same:
                         matched.append(other)
                     else:
                         unmatched.append(other)

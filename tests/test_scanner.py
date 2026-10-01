@@ -1,4 +1,5 @@
 """Tests for scanner.py — hashing, grouping, filters, turbo verification."""
+import builtins
 import hashlib
 import os
 import threading
@@ -327,6 +328,121 @@ class TestScanDirectory:
         b.write_bytes(b"A" * block + b"MID-B" + b"A" * block)
         results = scan_directory([str(tmp_path)], by_byte=True)
         assert results == {}
+
+
+class TestBytePhaseM6:
+    """M6: the byte phase must read each file's content once (no reference
+    re-reads per candidate) and must not re-prove with bytes what a full
+    SHA-256 has already proven."""
+
+    def _count_binary_opens(self, monkeypatch, paths):
+        """Patches builtins.open, recording every binary-mode open of the
+        given files — the honest I/O unit for the byte phase, independent of
+        which internal function performs the comparison."""
+        watch = {os.path.normcase(p) for p in paths}
+        opens = []
+        real_open = builtins.open
+
+        def counting_open(file, mode="r", *args, **kwargs):
+            if "b" in mode:
+                norm = os.path.normcase(os.fspath(file))
+                if norm in watch:
+                    opens.append(norm)
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", counting_open)
+        return opens
+
+    def test_byte_only_reads_group_files_once(self, tmp_path, monkeypatch):
+        """M6 regression: in a byte-only group of n identical files the old
+        phase opened the reference once per candidate — 2(n-1) opens for
+        n=5. Contract now: each file is opened exactly once."""
+        content = b"M6 reference content" * 512
+        paths = []
+        for i in range(5):
+            p = tmp_path / f"g{i}.bin"
+            p.write_bytes(content)
+            paths.append(str(p))
+
+        opens = self._count_binary_opens(monkeypatch, paths)
+
+        results = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        (group,) = results.values()
+        assert {f.path for f in group} == set(paths)
+        # Every file really compared (guards against a fake shortcut)...
+        assert set(opens) == {os.path.normcase(p) for p in paths}
+        # ...and each at most once: the old code made 8 opens out of 5 files.
+        assert len(opens) <= 5
+
+    @pytest.mark.parametrize("turbo_mode,expected_opens", [(True, 4), (False, 2)])
+    def test_hash_and_byte_does_not_reprove_with_bytes(self, tmp_path, monkeypatch, turbo_mode, expected_opens):
+        """M6 semantics: with by_hash on, groups arrive already proven by a
+        full SHA-256 (turbo verification replaces partial hashes before
+        Phase 3), so the byte phase must not open the files again. Expected
+        opens = hashing only: one full-SHA256 pass per file, plus one
+        partial pass per file in turbo mode. The old byte pass added 2."""
+        content = b"M6 proof content" * 512
+        paths = []
+        for name in ("p0.bin", "p1.bin"):
+            p = tmp_path / name
+            p.write_bytes(content)
+            paths.append(str(p))
+
+        opens = self._count_binary_opens(monkeypatch, paths)
+
+        results = scan_directory(
+            [str(tmp_path)], by_hash=True, by_byte=True,
+            turbo_mode=turbo_mode, use_cache=False,
+        )
+
+        (group,) = results.values()
+        assert {f.path for f in group} == set(paths)
+        assert len(opens) == expected_opens
+
+    @pytest.mark.parametrize("turbo_mode", [True, False])
+    def test_hash_and_byte_groups_equal_byte_only(self, tmp_path, turbo_mode):
+        """M6 equivalence: skipping the byte pass for hash-proven groups
+        must yield exactly the groups a literal byte-only scan produces on
+        the same tree (same size everywhere: 3xA, 2xB, 1xC alone)."""
+        for i in range(3):
+            (tmp_path / f"a{i}.bin").write_bytes(b"A" * 5000)
+        for i in range(2):
+            (tmp_path / f"b{i}.bin").write_bytes(b"B" * 5000)
+        (tmp_path / "c.bin").write_bytes(b"C" * 5000)
+
+        hash_and_byte = scan_directory(
+            [str(tmp_path)], by_hash=True, by_byte=True,
+            turbo_mode=turbo_mode, use_cache=False,
+        )
+        byte_only = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        def memberships(results):
+            return sorted(sorted(f.path for f in files) for files in results.values() if len(files) > 1)
+
+        assert memberships(hash_and_byte) == memberships(byte_only)
+        assert memberships(byte_only) == [
+            sorted(str(tmp_path / f"a{i}.bin") for i in range(3)),
+            sorted(str(tmp_path / f"b{i}.bin") for i in range(2)),
+        ]
+
+    def test_byte_only_splits_same_size_late_difference(self, tmp_path):
+        """M6 correctness: identical size with the difference deep inside
+        the file (past the first chunk boundary) must still split — the
+        cached-reference comparison must walk every chunk before declaring
+        a match."""
+        shared_head = b"S" * 100000
+        for name, tail in (("a1", b"A" * 50000), ("a2", b"A" * 50000),
+                           ("b1", b"B" * 50000), ("b2", b"B" * 50000)):
+            (tmp_path / f"{name}.bin").write_bytes(shared_head + tail)
+
+        results = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        pairs = sorted(
+            tuple(sorted(os.path.basename(f.path) for f in files))
+            for files in results.values()
+        )
+        assert pairs == [("a1.bin", "a2.bin"), ("b1.bin", "b2.bin")]
 
 
 class TestPhysicalFileDedup:
