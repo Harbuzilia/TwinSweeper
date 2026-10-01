@@ -1,4 +1,4 @@
-# Duplicater — Pro Disk Optimizer v3.6
+# Duplicater — Pro Disk Optimizer v3.7
 
 Настольное приложение для Windows (Python + [Flet](https://flet.dev)) для поиска и
 безопасного удаления дубликатов файлов, похожих изображений и накопившегося мусора.
@@ -73,7 +73,7 @@
 
 ## Требования
 
-- Windows 10/11, Python 3.10+ (проект собирается и тестируется на 3.14).
+- Windows 10/11, Python 3.12+ (os.path.isjunction; проект собирается и тестируется на 3.14).
 - Зависимости — в [`requirements.txt`](requirements.txt) (точные версии), dev-инструменты
   (pytest, ruff, pyinstaller) — в [`requirements-dev.txt`](requirements-dev.txt).
 

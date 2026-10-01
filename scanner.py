@@ -298,7 +298,7 @@ def scan_directory(
             dirs[:] = [
                 d for d in dirs
                 if d.lower() not in _ALWAYS_EXCLUDED_DIRS
-                and not os.path.isjunction(os.path.join(root, d))
+                and not os.path.isjunction(os.path.join(root, d))  # Python 3.12+ (os.path.isjunction)
             ]
             if exclude_patterns:
                 dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
@@ -567,7 +567,7 @@ def scan_for_sample(
             dirs[:] = [
                 d for d in dirs
                 if d.lower() not in _ALWAYS_EXCLUDED_DIRS
-                and not os.path.isjunction(os.path.join(root, d))
+                and not os.path.isjunction(os.path.join(root, d))  # Python 3.12+ (os.path.isjunction)
             ]
 
             for filename in filenames:
