@@ -12,6 +12,7 @@ ENV/
 build/
 dist/
 *.spec
+!Duplicater.spec
 
 # Agent harness state (local sessions, lessons, history)
 .opencode/
