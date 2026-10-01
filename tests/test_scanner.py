@@ -9,15 +9,18 @@ import pytest
 
 import scanner
 from scanner import (
+    BYTE_REFERENCE_CACHE_LIMIT,
     FileInfo,
     calculate_similarity,
     compare_byte_by_byte,
     compare_folders,
+    content_matches_bytes,
     format_file_size,
     get_file_category,
     get_file_hash,
     get_turbo_hash,
     is_system_path,
+    load_byte_reference,
     scan_directory,
     scan_for_sample,
 )
@@ -443,6 +446,109 @@ class TestBytePhaseM6:
             for files in results.values()
         )
         assert pairs == [("a1.bin", "a2.bin"), ("b1.bin", "b2.bin")]
+
+    def test_byte_only_cancel_mid_group_returns_empty(self, tmp_path, monkeypatch):
+        """Stage-1 review follow-up: cancel must be honored INSIDE the
+        subgroup loop — the old code only checked between groups, so one
+        huge group kept comparing after the user pressed Cancel."""
+        for name, content in (("a", b"C" * 1000), ("b", b"C" * 1000),
+                              ("c", b"C" * 1000), ("d", b"D" * 1000),
+                              ("e", b"D" * 1000), ("f", b"D" * 1000)):
+            (tmp_path / f"{name}.bin").write_bytes(content)
+
+        cancel_flag = [False]
+        real_cmp = scanner.content_matches_bytes
+
+        def cancelling_cmp(expected, path, buffer_size=65536):
+            cancel_flag[0] = True  # the user pressed Cancel mid-group
+            return real_cmp(expected, path, buffer_size)
+
+        monkeypatch.setattr(scanner, "content_matches_bytes", cancelling_cmp)
+
+        results = scan_directory(
+            [str(tmp_path)], by_hash=False, by_byte=True,
+            use_cache=False, cancel_flag=cancel_flag,
+        )
+        assert results == {}
+
+
+class TestContentMatchesBytesEdges:
+    """Stage-1 review follow-up: the boundary contract of the RAM-compare
+    helper (M6) — pinned before the byte-phase changes touch it."""
+
+    def test_empty_reference_matches_empty_file(self, tmp_path):
+        p = tmp_path / "empty.bin"
+        p.write_bytes(b"")
+        assert content_matches_bytes(b"", str(p)) is True
+
+    def test_empty_reference_rejects_nonempty_file(self, tmp_path):
+        p = tmp_path / "x.bin"
+        p.write_bytes(b"x")
+        assert content_matches_bytes(b"", str(p)) is False
+
+    def test_content_exactly_one_buffer(self, tmp_path):
+        """expected == one full chunk: the "file must end exactly where the
+        reference ends" check runs right after the chunk loop."""
+        chunk = bytes(range(256)) * 256  # 65536 = default buffer_size
+        p = tmp_path / "chunk.bin"
+        p.write_bytes(chunk)
+        assert content_matches_bytes(chunk, str(p)) is True
+
+    def test_difference_in_last_byte(self, tmp_path):
+        content = b"A" * 70000
+        p = tmp_path / "a.bin"
+        p.write_bytes(content)
+        expected = b"A" * 69999 + b"B"
+        assert content_matches_bytes(expected, str(p)) is False
+
+    def test_identical_multichunk_content(self, tmp_path):
+        payload = os.urandom(200_000)  # several buffer sizes
+        p = tmp_path / "r.bin"
+        p.write_bytes(payload)
+        assert content_matches_bytes(payload, str(p)) is True
+
+    def test_candidate_shorter_than_reference(self, tmp_path):
+        p = tmp_path / "short.bin"
+        p.write_bytes(b"A" * 100)
+        assert content_matches_bytes(b"A" * 101, str(p)) is False
+
+    def test_candidate_longer_than_reference(self, tmp_path):
+        p = tmp_path / "long.bin"
+        p.write_bytes(b"A" * 101)
+        assert content_matches_bytes(b"A" * 100, str(p)) is False
+
+    def test_missing_file_returns_false(self, tmp_path):
+        assert content_matches_bytes(b"A", str(tmp_path / "nope.bin")) is False
+
+
+class TestLoadByteReference:
+    """Stage-1 review follow-up: the reference snapshot must match the
+    INDEXED size — a file that changed on disk since indexing must not
+    anchor a subgroup with stale/shifted content (fall back to streaming)."""
+
+    def test_returns_content_when_size_matches(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"reference")
+        assert load_byte_reference(str(p), 9) == b"reference"
+
+    def test_shrunk_file_returns_none(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"123456789")  # 9 bytes on disk
+        assert load_byte_reference(str(p), 10) is None  # indexed as 10
+
+    def test_grown_file_returns_none(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"1234567890")  # 10 bytes on disk
+        assert load_byte_reference(str(p), 9) is None  # indexed as 9
+
+    def test_unreadable_file_returns_none(self, tmp_path):
+        assert load_byte_reference(str(tmp_path / "nope.bin"), 5) is None
+
+    def test_oversized_reference_returns_none(self, tmp_path):
+        """Over the RAM cap: stream instead, regardless of disk content."""
+        p = tmp_path / "big.bin"
+        p.write_bytes(b"x" * 10)
+        assert load_byte_reference(str(p), BYTE_REFERENCE_CACHE_LIMIT + 1) is None
 
 
 class TestPhysicalFileDedup:

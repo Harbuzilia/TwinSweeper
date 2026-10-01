@@ -28,7 +28,9 @@ class TestPruneDirs:
         result = prune_dirs(str(tmp_path), dirs)
         assert result == ["Keep"]
         # In-place: os.walk(topdown=True) only prunes when the SAME list
-        # object is mutated.
+        # object is mutated — the returned reference must be the list the
+        # caller passed, not a copy.
+        assert result is dirs
         assert dirs == ["Keep"]
 
     def test_similar_names_are_not_pruned(self, tmp_path):

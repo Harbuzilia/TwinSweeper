@@ -2,7 +2,7 @@ import os
 import hashlib
 import fnmatch
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Callable, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +11,7 @@ from db_cache import cache_db
 from fs_filters import (
     InodeDeduper,
     inode_key,
-    is_system_path as is_system_path,  # re-export: sweeper/results_view import it from scanner
+    is_system_path as is_system_path,  # re-export: results_view imports it from scanner (sweeper imports from fs_filters directly)
     prune_dirs,
 )
 from locales import get_text
@@ -175,7 +175,14 @@ def load_byte_reference(path: str, size: int) -> Optional[bytes]:
         # cap+1: a file that GREW past the cap since indexing must not be
         # slurped into memory whole here.
         with open(long_path(path), 'rb') as f:
-            return f.read(BYTE_REFERENCE_CACHE_LIMIT + 1)
+            ref = f.read(BYTE_REFERENCE_CACHE_LIMIT + 1)
+        # The read must match the INDEXED size: a file that changed on disk
+        # since indexing would otherwise anchor the subgroup with content
+        # shifted against the candidates' size-snapshots. Mismatch -> None
+        # -> per-candidate streaming over the actual content.
+        if len(ref) != size:
+            return None
+        return ref
     except (OSError, PermissionError):
         return None
 
@@ -474,16 +481,21 @@ def scan_directory(
             if is_cancelled():
                 return {}
 
-            remaining = files[:]
+            remaining = deque(files)
             sub_idx = 0
             while remaining:
-                current = remaining.pop(0)
+                # Cancel must be honored INSIDE the subgroup loop too — a
+                # single huge group used to keep comparing (and reading)
+                # long after the user pressed Cancel (stage-1 review).
+                if is_cancelled():
+                    return {}
+                current = remaining.popleft()
                 # M6: the reference is read once per subgroup and served
                 # from RAM to every candidate (see load_byte_reference for
                 # the oversized fallback).
                 ref_content = load_byte_reference(current.path, current.size)
                 matched = [current]
-                unmatched = []
+                unmatched = deque()
                 for other in remaining:
                     # Equal content implies equal size — skip the I/O for
                     # size-mismatched candidates outright.
