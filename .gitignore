@@ -13,6 +13,9 @@ build/
 dist/
 *.spec
 
+# Agent harness state (local sessions, lessons, history)
+.opencode/
+
 # History & logs
 scan_history.json
 *.log
