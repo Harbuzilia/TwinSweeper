@@ -2,4 +2,4 @@
 
 APP_NAME = "Duplicater"
 APP_TAGLINE = "Pro Disk Optimizer"
-APP_VERSION = "3.6"
+APP_VERSION = "3.7"

@@ -8,6 +8,7 @@ from sweeper import (
     find_broken_shortcuts,
     find_empty_directories,
     find_junk_files,
+    remove_emptied_parents,
     resolve_windows_shortcut_target,
 )
 
@@ -132,6 +133,105 @@ class TestJunkFiles:
         assert str(tmp_path / "user.tmp") in junk
 
 
+class TestPrunedTraversal:
+    """M2/M3: all three sweeper walks use the shared fs_filters rules —
+    junctions and system locations are neither scanned nor reported."""
+
+    def _make_junction(self, link, target):
+        import subprocess
+
+        try:
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                check=True, capture_output=True, timeout=15,
+            )
+            return True
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return False
+
+    def test_junction_target_junk_not_reported(self, tmp_path):
+        """A junk file behind a junction pointing outside the scan root
+        must not appear in the candidates."""
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "junk.tmp").write_text("x")
+        root = tmp_path / "root"
+        root.mkdir()
+        if not self._make_junction(root / "link", external):
+            pytest.skip("cannot create junction on this system")
+
+        assert {f.path for f in find_junk_files([str(root)])} == set()
+
+    def test_junction_node_not_an_empty_dir_candidate(self, tmp_path):
+        """A junction to an empty folder must not be walked as a folder and
+        must not be offered for deletion."""
+        external = tmp_path / "external"
+        external.mkdir()
+        root = tmp_path / "root"
+        root.mkdir()
+        if not self._make_junction(root / "link", external):
+            pytest.skip("cannot create junction on this system")
+
+        assert find_empty_directories([str(root)]) == []
+
+    def test_junction_target_shortcuts_not_reported(self, tmp_path):
+        """Broken .lnk files behind a junction must not be reported either —
+        the shortcut walk prunes the same way."""
+        external = tmp_path / "external"
+        external.mkdir()
+        make_lnk(external / "broken.lnk", str(tmp_path / "gone.txt"))
+        root = tmp_path / "root"
+        root.mkdir()
+        if not self._make_junction(root / "link", external):
+            pytest.skip("cannot create junction on this system")
+
+        assert find_broken_shortcuts([str(root)]) == []
+
+    def test_recycle_bin_and_svi_junk_not_candidates(self, tmp_path):
+        """Junk inside pruned system locations must never be a deletion
+        candidate (is_system_path alone did not stop the walk — the tmp
+        tree's first component is not a system root)."""
+        bin_dir = tmp_path / "$Recycle.Bin" / "S-1-5-21"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "junk.tmp").write_text("x")
+        svi = tmp_path / "System Volume Information"
+        svi.mkdir()
+        (svi / "cache.old").write_text("x")
+        (tmp_path / "user.tmp").write_text("x")
+
+        junk = {f.path for f in find_junk_files([str(tmp_path)])}
+
+        assert junk == {str(tmp_path / "user.tmp")}
+
+    def test_recycle_bin_and_svi_empty_dirs_not_candidates(self, tmp_path):
+        bin_dir = tmp_path / "$Recycle.Bin" / "S-1-5-21"
+        bin_dir.mkdir(parents=True)
+        (tmp_path / "System Volume Information").mkdir()
+        (tmp_path / "user_empty").mkdir()
+
+        found = find_empty_directories([str(tmp_path)])
+
+        assert set(found) == {str(tmp_path / "user_empty")}
+
+    def test_nested_empty_tree_still_found_bottom_up(self, tmp_path):
+        """The walk switched from topdown=False to topdown+pruning; the
+        discovery order must stay bottom-up (deepest first) so nested empty
+        trees collapse in one pass and callers relying on child-before-parent
+        order keep working."""
+        root = tmp_path / "root"
+        (root / "a" / "b" / "c").mkdir(parents=True)
+
+        found = find_empty_directories([str(root)])
+
+        assert set(found) == {
+            str(root / "a" / "b" / "c"),
+            str(root / "a" / "b"),
+            str(root / "a"),
+        }
+        assert found.index(str(root / "a" / "b" / "c")) < found.index(str(root / "a" / "b"))
+        assert found.index(str(root / "a" / "b")) < found.index(str(root / "a"))
+
+
 class TestShortcuts:
     def test_resolve_valid_local_shortcut(self, tmp_path):
         target = tmp_path / "target.txt"
@@ -246,3 +346,41 @@ class TestNestedEmptyDirectoryDeletion:
         assert count == len(found)
         assert errors == []
         assert not root.exists()
+
+
+class TestRemoveEmptiedParents:
+    """Round 4: folders left empty by a delete/move are removed — os.rmdir
+    only, so a folder that still holds anything is always left alone."""
+
+    def test_empty_parent_removed(self, tmp_path):
+        sub = tmp_path / "gone"
+        sub.mkdir()
+        f = sub / "dup.bin"
+        f.write_bytes(b"x")
+        f.unlink()
+        removed, errors = remove_emptied_parents([str(f)])
+        assert removed == 1
+        assert errors == []
+        assert not sub.exists()
+
+    def test_non_empty_parent_kept(self, tmp_path):
+        sub = tmp_path / "kept"
+        sub.mkdir()
+        (sub / "other.bin").write_bytes(b"y")
+        removed, errors = remove_emptied_parents([str(sub / "deleted.bin")])
+        assert removed == 0
+        assert errors == []
+        assert sub.exists()
+
+    def test_duplicate_parents_removed_once(self, tmp_path):
+        sub = tmp_path / "once"
+        sub.mkdir()
+        removed, errors = remove_emptied_parents([str(sub / "a.bin"), str(sub / "b.bin")])
+        assert removed == 1
+        assert errors == []
+        assert not sub.exists()
+
+    def test_missing_parent_is_not_an_error(self, tmp_path):
+        removed, errors = remove_emptied_parents([str(tmp_path / "no_such_dir" / "file.bin")])
+        assert removed == 0
+        assert errors == []

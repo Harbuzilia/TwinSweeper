@@ -5,13 +5,14 @@ import html
 import json
 import datetime
 import functools
-from typing import Dict, List, Set, Tuple
+import threading
+from typing import Dict, List, Optional, Set, Tuple
 from PIL import Image
 
 from scanner import FileInfo, is_system_path, format_file_size, compute_wasted_bytes
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_kpi_badge, format_path_short, get_current_theme, get_styled_dialog, get_action_icon_button,
+    get_kpi_badge, format_path_short, get_current_theme, get_styled_dialog, get_action_icon_button, tint,
     PRIMARY_COLOR, SUCCESS_COLOR, DANGER_COLOR, INFO_COLOR, WARNING_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER,
     CATEGORY_ICONS
@@ -26,6 +27,13 @@ logger = get_logger(__name__)
 
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
+    # 2.1c: keystroke debounce — rebuilding/redrawing the whole column is
+    # O(groups), so the refresh waits for a pause in typing.
+    SEARCH_DEBOUNCE_DELAY = 0.25
+    # 2.1d: the lightbox opens on the cached thumbnail and swaps the
+    # full-size file in after this beat (lets the client paint the preview
+    # before the original starts streaming).
+    LIGHTBOX_FULL_IMAGE_DELAY = 0.15
 
     def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True, content_verified: bool = True, trash_available: bool = True):
         super().__init__()
@@ -61,6 +69,8 @@ class ResultsView(ft.Column):
         self.active_category: str = "all"
         self.search_query: str = ""
         self.loaded_groups_count: int = 0
+        # Pending debounce timer for the search field (2.1c).
+        self._search_debounce_timer: Optional[threading.Timer] = None
 
         # Filter / sort / view state
         self.min_size_filter: int = 0
@@ -101,14 +111,19 @@ class ResultsView(ft.Column):
                 self.category_wasted[cat] = self.category_wasted.get(cat, 0) + wasted
 
         # UI Components
+        # Fixed width, NOT expand: this field lives in a `wrap=True` Row, and
+        # Flutter rejects an Expanded child inside a Wrap — the whole command
+        # deck rendered as a grey ErrorWidget on the results screen.
         self.search_field = ft.TextField(
             hint_text=get_text("search_placeholder", self.language),
             prefix_icon=ft.Icons.SEARCH_ROUNDED,
             bgcolor=SURFACE_HOVER,
             border_color=BORDER_COLOR,
+            border_radius=8,
+            focused_border_color=PRIMARY_COLOR,
             text_size=13,
             height=40,
-            expand=True,
+            width=280,
             on_change=self.on_search_change
         )
 
@@ -305,8 +320,8 @@ class ResultsView(ft.Column):
                 ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=WARNING_COLOR, size=18),
                 ft.Text(get_text("unverified_content_warning", self.language), size=12, color=WARNING_COLOR, expand=True)
             ], spacing=8),
-            bgcolor=f"{WARNING_COLOR}18",
-            border=ft.Border.all(1, f"{WARNING_COLOR}55"),
+            bgcolor=tint(WARNING_COLOR, "18"),
+            border=ft.Border.all(1, tint(WARNING_COLOR, "55")),
             border_radius=8,
             padding=10,
             visible=not self.content_verified
@@ -324,7 +339,7 @@ class ResultsView(ft.Column):
                         ft.Text(get_text(f"filter_{cat}", self.language), size=12, color="#FFFFFF" if is_active else theme["TEXT_SECONDARY"], weight=ft.FontWeight.BOLD if is_active else ft.FontWeight.NORMAL),
                         ft.Container(
                             content=ft.Text(str(count), size=10, color="#FFFFFF" if is_active else theme["TEXT_MUTED"]),
-                            bgcolor=f"{theme['PRIMARY_LIGHT']}44" if is_active else theme["SURFACE_HOVER"],
+                            bgcolor=tint(theme['PRIMARY_LIGHT'], "44") if is_active else theme["SURFACE_HOVER"],
                             border_radius=10,
                             padding=ft.Padding.symmetric(horizontal=6, vertical=1)
                         )
@@ -377,9 +392,11 @@ class ResultsView(ft.Column):
                         self.search_field,
                         self.smart_select_dropdown,
                         self.priority_folders_btn,
-                        self.move_btn,
-                        self.hardlink_btn,
-                        self.delete_btn
+                        # ft.Button must NOT be a direct child of a wrap Row:
+                        # Flutter throws a layout error and the whole deck (and
+                        # everything below it) renders as a grey ErrorWidget.
+                        # The buttons live in a plain tight Row child instead.
+                        ft.Row([self.move_btn, self.hardlink_btn, self.delete_btn], spacing=8, tight=True),
                     ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, wrap=True, spacing=8),
                     self.category_chips_row,
                     ft.Row([
@@ -434,6 +451,23 @@ class ResultsView(ft.Column):
         self.refresh_filtered_results()
 
     def on_search_change(self, e):
+        # 2.1c: defer the (expensive, whole-column) refresh ~250 ms after the
+        # LAST keystroke — a newer keystroke cancels the pending refresh, so
+        # fast typing cannot trigger a render storm.
+        if self._search_debounce_timer is not None:
+            self._search_debounce_timer.cancel()
+        timer = threading.Timer(self.SEARCH_DEBOUNCE_DELAY, self._apply_search_query)
+        timer.daemon = True
+        self._search_debounce_timer = timer
+        timer.start()
+
+    def _apply_search_query(self):
+        # Only the timer that is CURRENTLY scheduled may run the refresh: a
+        # callback racing a newer keystroke (fired just before cancel())
+        # must stay silent — the newer timer owns the field now.
+        if self._search_debounce_timer is not threading.current_thread():
+            return
+        self._search_debounce_timer = None
         self.search_query = self.search_field.value.lower().strip()
         self.refresh_filtered_results()
 
@@ -650,8 +684,8 @@ class ResultsView(ft.Column):
 
         return ft.Container(
             content=ft.Row(row_content, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            bgcolor=f"{PRIMARY_COLOR}12" if is_selected else (SURFACE_HOVER if index % 2 == 0 else "transparent"),
-            border=ft.Border.all(1, f"{PRIMARY_COLOR}35" if is_selected else "transparent"),
+            bgcolor=tint(PRIMARY_COLOR, "12") if is_selected else (SURFACE_HOVER if index % 2 == 0 else "transparent"),
+            border=ft.Border.all(1, tint(PRIMARY_COLOR, "35") if is_selected else "transparent"),
             border_radius=8,
             padding=ft.Padding.symmetric(horizontal=10, vertical=6)
         )
@@ -963,12 +997,20 @@ class ResultsView(ft.Column):
         def close_modal(e):
             page.pop_dialog()
 
+        # 2.1d progressive open: the cached thumbnail is a small JPEG that is
+        # usually already generated for the result rows, so the dialog paints
+        # instantly; the full-size file is swapped in right after.
+        # get_cached_thumbnail itself falls back to the original path when no
+        # preview can be made (corrupt image, read-only cache dir) — the old
+        # behaviour is preserved.
+        image = ft.Image(src=get_cached_thumbnail(image_path), fit=ft.BoxFit.CONTAIN)
+
         dlg = get_styled_dialog(
             title=os.path.basename(image_path),
             icon=ft.Icons.IMAGE_ROUNDED,
             icon_color=PRIMARY_COLOR,
             content=ft.Container(
-                content=ft.Image(src=image_path, fit=ft.BoxFit.CONTAIN),
+                content=image,
                 width=600,
                 height=450,
             ),
@@ -978,6 +1020,18 @@ class ResultsView(ft.Column):
             ]
         )
         page.show_dialog(dlg)
+
+        def upgrade_to_full_size():
+            try:
+                image.src = image_path
+                image.update()
+            except Exception as ex:
+                # The dialog keeps showing the thumbnail it opened with.
+                logger.debug("lightbox full-size swap failed for %s: %s", image_path, ex)
+
+        timer = threading.Timer(self.LIGHTBOX_FULL_IMAGE_DELAY, upgrade_to_full_size)
+        timer.daemon = True
+        timer.start()
 
     def open_file_natively(self, path: str):
         try:
@@ -1007,7 +1061,7 @@ class ResultsView(ft.Column):
         if page is None:
             return
 
-        def confirm_delete(use_trash: bool):
+        def confirm_delete(use_trash: bool, remove_empty: bool):
             page.pop_dialog()
             # C3: keep at least one copy in every fully-selected group.
             self._protect_originals()
@@ -1024,7 +1078,7 @@ class ResultsView(ft.Column):
             except Exception:
                 pass
             self._operation_busy = True
-            self.on_delete(selected_entries, use_trash=use_trash)
+            self.on_delete(selected_entries, use_trash=use_trash, remove_empty_folders=remove_empty)
 
         def cancel_dialog(e):
             page.pop_dialog()
@@ -1037,8 +1091,17 @@ class ResultsView(ft.Column):
             disabled=not self.trash_available
         )
 
+        # Keep the trash checkbox the LAST control of the dialog (existing
+        # headless UI tests pin that position) — this one goes before it.
+        remove_empty_checkbox = ft.Checkbox(
+            label=get_text("remove_empty_folders_label", self.language),
+            value=False,
+            tooltip=get_text("remove_empty_folders_hint", self.language)
+        )
+
         content_controls = [
             ft.Text(get_text("delete_summary_msg", self.language).format(len(selected_list), format_file_size(total_size)), size=14),
+            remove_empty_checkbox,
             trash_checkbox
         ]
 
@@ -1046,7 +1109,7 @@ class ResultsView(ft.Column):
             content_controls.insert(0,
                 ft.Container(
                     content=ft.Text(get_text("delete_all_selected_warning", self.language).format(endangered), color=WARNING_COLOR, size=12),
-                    bgcolor=f"{WARNING_COLOR}22",
+                    bgcolor=tint(WARNING_COLOR, "22"),
                     padding=10,
                     border_radius=8
                 )
@@ -1059,7 +1122,7 @@ class ResultsView(ft.Column):
             content_controls.insert(0,
                 ft.Container(
                     content=ft.Text(get_text("system_delete_warning", self.language).format(sys_summary), color=DANGER_COLOR, size=12),
-                    bgcolor=f"{DANGER_COLOR}22",
+                    bgcolor=tint(DANGER_COLOR, "22"),
                     padding=10,
                     border_radius=8
                 )
@@ -1074,7 +1137,7 @@ class ResultsView(ft.Column):
                 get_outlined_button(text=get_text("cancel", self.language), on_click=cancel_dialog),
                 get_primary_button(
                     text=get_text("delete", self.language),
-                    on_click=lambda _: confirm_delete(use_trash=trash_checkbox.value),
+                    on_click=lambda _: confirm_delete(use_trash=trash_checkbox.value, remove_empty=remove_empty_checkbox.value),
                     bgcolor=DANGER_COLOR,
                     icon=ft.Icons.DELETE_ROUNDED
                 )
@@ -1166,18 +1229,27 @@ class ResultsView(ft.Column):
             f.size for files in self.all_results.values() for f in files if f.path in self.selected_paths
         )
 
+        remove_empty_checkbox = ft.Checkbox(
+            label=get_text("remove_empty_folders_label", self.language),
+            value=False,
+            tooltip=get_text("remove_empty_folders_hint", self.language)
+        )
+
         def confirm_move(_):
             page.pop_dialog()
-            self._do_move(destination)
+            self._do_move(destination, remove_empty=remove_empty_checkbox.value)
 
         dlg = get_styled_dialog(
             title=get_text("move_confirm_title", self.language),
             icon=ft.Icons.DRIVE_FILE_MOVE_ROUNDED,
             icon_color=PRIMARY_COLOR,
-            content=ft.Text(
-                get_text("move_confirm_msg", self.language).format(len(selected_list), format_file_size(total_size), destination),
-                size=13, color=TEXT_SECONDARY
-            ),
+            content=ft.Column([
+                ft.Text(
+                    get_text("move_confirm_msg", self.language).format(len(selected_list), format_file_size(total_size), destination),
+                    size=13, color=TEXT_SECONDARY
+                ),
+                remove_empty_checkbox
+            ], tight=True, spacing=12),
             actions=[
                 get_outlined_button(text=get_text("cancel", self.language), on_click=lambda _: page.pop_dialog()),
                 get_primary_button(
@@ -1189,7 +1261,7 @@ class ResultsView(ft.Column):
         )
         page.show_dialog(dlg)
 
-    def _do_move(self, destination: str):
+    def _do_move(self, destination: str, remove_empty: bool = False):
         """Confirm-handler core for "Move to folder" — extracted so the C3
         protection is testable headless. Never moves a group out entirely:
         at least one copy stays in its original location."""
@@ -1207,7 +1279,7 @@ class ResultsView(ft.Column):
         except Exception:
             pass
         self._operation_busy = True
-        self.on_move(selected_entries, destination)
+        self.on_move(selected_entries, destination, remove_empty_folders=remove_empty)
 
     def remove_files(self, removed_paths: List[str]):
         removed_set = set(removed_paths)

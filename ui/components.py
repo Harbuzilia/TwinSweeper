@@ -23,7 +23,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "TEXT_PRIMARY": "#F8FAFC",
         "TEXT_SECONDARY": "#94A3B8",
         "TEXT_MUTED": "#64748B",
-        "SHADOW_COLOR": "#0000003D",
+        "SHADOW_COLOR": "#3D000000",
         "SIMILARITY_COLOR": "#8B5CF6",
     },
     "midnight_oled": {
@@ -44,7 +44,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "TEXT_PRIMARY": "#FAFAFA",
         "TEXT_SECONDARY": "#A1A1AA",
         "TEXT_MUTED": "#71717A",
-        "SHADOW_COLOR": "#0000005C",
+        "SHADOW_COLOR": "#5C000000",
         "SIMILARITY_COLOR": "#8B5CF6",
     },
     "light_clean": {
@@ -65,7 +65,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "TEXT_PRIMARY": "#0F172A",
         "TEXT_SECONDARY": "#475569",
         "TEXT_MUTED": "#94A3B8",
-        "SHADOW_COLOR": "#0F172A14",
+        "SHADOW_COLOR": "#140F172A",
         "SIMILARITY_COLOR": "#8B5CF6",
     }
 }
@@ -74,6 +74,20 @@ ACTIVE_THEME_KEY = "dark_slate"
 
 _PALETTE_KEYS = tuple(THEMES["dark_slate"].keys())
 
+# First-party modules that bind palette constants at import time via
+# ``from ui.components import PRIMARY_COLOR, ...``. A theme switch rewrites
+# exactly these bindings, by name. The old implementation matched by VALUE
+# across ALL of sys.modules and also rewrote unrelated modules that just
+# happened to hold an identical string.
+_PALETTE_CONSUMERS = (
+    "main",
+    "ui.search_view",
+    "ui.results_view",
+    "ui.compare_view",
+    "ui.sample_search_view",
+    "ui.sweeper_view",
+)
+
 def get_current_theme() -> Dict[str, str]:
     return THEMES.get(ACTIVE_THEME_KEY, THEMES["dark_slate"])
 
@@ -81,11 +95,18 @@ def get_active_theme_key() -> str:
     return ACTIVE_THEME_KEY
 
 def set_active_theme(theme_name: str):
-    """Switches the active palette and propagates new colors everywhere."""
+    """Switches the active palette and propagates the new colors.
+
+    Updates this module's aliases and the palette constants of the
+    first-party modules listed in ``_PALETTE_CONSUMERS`` (they bind the
+    constants at import time, so the switch must rewrite them explicitly;
+    main.change_theme clears view_cache so views rebuild with the new
+    colors). Modules outside that list are never touched — the old
+    value-matching scan over sys.modules silently corrupted third-party
+    modules that coincidentally held a palette string."""
     global ACTIVE_THEME_KEY
     if theme_name not in THEMES or theme_name == ACTIVE_THEME_KEY:
         return
-    old_palette = THEMES.get(ACTIVE_THEME_KEY, THEMES["dark_slate"])
     new_palette = THEMES[theme_name]
     ACTIVE_THEME_KEY = theme_name
 
@@ -93,14 +114,15 @@ def set_active_theme(theme_name: str):
     for key, value in new_palette.items():
         setattr(this_module, key, value)
 
-    for module in list(sys.modules.values()):
+    for name in _PALETTE_CONSUMERS:
+        module = sys.modules.get(name)
         if module is None or module is this_module:
             continue
         mod_dict = getattr(module, "__dict__", None)
         if not mod_dict:
             continue
         for key in _PALETTE_KEYS:
-            if mod_dict.get(key) == old_palette.get(key):
+            if key in mod_dict:
                 mod_dict[key] = new_palette[key]
 
 # Default palette aliases
@@ -121,6 +143,20 @@ SIMILARITY_COLOR = THEMES["dark_slate"]["SIMILARITY_COLOR"]
 TEXT_PRIMARY = THEMES["dark_slate"]["TEXT_PRIMARY"]
 TEXT_SECONDARY = THEMES["dark_slate"]["TEXT_SECONDARY"]
 TEXT_MUTED = THEMES["dark_slate"]["TEXT_MUTED"]
+
+def tint(color: str, alpha_hex: str) -> str:
+    """A translucent variant of *color*, in the byte order flet actually parses.
+
+    flet (like Flutter) reads an 8-digit hex color as #AARRGGBB. The old
+    ``f"{COLOR}1C"`` form built '#RRGGBBAA' instead, so the client took the
+    alpha byte for the red channel — indigo tints rendered lime-green and
+    translucent shadows rendered fully transparent. Build the alpha-first
+    form here so every translucent color in the app matches its palette."""
+    h = color.lstrip("#")
+    if len(h) != 6:
+        return color  # named colors / non-hex values pass through untouched
+    return f"#{alpha_hex.upper()}{h.upper()}"
+
 
 CATEGORY_ICONS = {
     "images": (ft.Icons.IMAGE_OUTLINED, "#38BDF8"),
@@ -164,7 +200,7 @@ def get_styled_card(
         ft.BoxShadow(
             blur_radius=12,
             spread_radius=0,
-            color=theme.get("SHADOW_COLOR", "#0000002E"),
+            color=theme.get("SHADOW_COLOR", "#2E000000"),
             offset=ft.Offset(0, 4)
         )
         if shadow
@@ -194,7 +230,7 @@ def get_stat_card(
         content=ft.Row([
             ft.Container(
                 content=ft.Icon(icon, color=ic_col, size=24),
-                bgcolor=f"{ic_col}1F",
+                bgcolor=tint(ic_col, "1F"),
                 border_radius=10,
                 padding=12,
             ),
@@ -211,7 +247,7 @@ def get_stat_card(
         shadow=ft.BoxShadow(
             blur_radius=10,
             spread_radius=0,
-            color=theme.get("SHADOW_COLOR", "#00000028"),
+            color=theme.get("SHADOW_COLOR", "#28000000"),
             offset=ft.Offset(0, 3)
         ),
         expand=expand
@@ -258,7 +294,7 @@ def get_outlined_button(
     icon: Optional[str] = None,
     border_color: Optional[str] = None,
     color: Optional[str] = None,
-    height: int = 40,
+    height: int = 42,
     expand: bool = False
 ) -> ft.Button:
     theme = get_current_theme()
@@ -296,8 +332,8 @@ def get_badge(text: str, color: Optional[str] = None, icon: Optional[str] = None
     content_list.append(ft.Text(text, size=11, color=c, weight=ft.FontWeight.W_600))
 
     return ft.Container(
-        content=ft.Row(content_list, spacing=4, alignment=ft.MainAxisAlignment.CENTER),
-        bgcolor=f"{c}22",
+        content=ft.Row(content_list, spacing=4, alignment=ft.MainAxisAlignment.CENTER, tight=True),
+        bgcolor=tint(c, "22"),
         border_radius=12,
         padding=ft.Padding.symmetric(horizontal=8, vertical=3),
     )
@@ -323,7 +359,7 @@ def get_kpi_badge(icon: str, label: str, value: str, color: Optional[str] = None
             ft.Icon(icon, size=16, color=accent),
             ft.Text(label, size=11, color=theme["TEXT_MUTED"]),
             ft.Text(value, size=12, weight=ft.FontWeight.BOLD, color=theme["TEXT_PRIMARY"]),
-        ], spacing=6, alignment=ft.MainAxisAlignment.CENTER),
+        ], spacing=6, alignment=ft.MainAxisAlignment.CENTER, tight=True),
         bgcolor=theme["SURFACE_HOVER"],
         border=ft.Border.all(1, theme["BORDER_COLOR"]),
         border_radius=8,
@@ -352,13 +388,13 @@ def get_mode_tile(
     """Interactive selectable mode tile with clean visual feedback."""
     theme = get_current_theme()
     accent = theme["PRIMARY_COLOR"] if is_selected else theme["TEXT_MUTED"]
-    bg = f"{theme['PRIMARY_COLOR']}1C" if is_selected else theme["SURFACE_CARD"]
+    bg = tint(theme['PRIMARY_COLOR'], "1C") if is_selected else theme["SURFACE_CARD"]
     border_col = theme["PRIMARY_COLOR"] if is_selected else theme["BORDER_COLOR"]
 
     header_row = [
         ft.Container(
             content=ft.Icon(icon, size=20, color=accent),
-            bgcolor=f"{accent}22" if is_selected else theme["SURFACE_HOVER"],
+            bgcolor=tint(accent, "22") if is_selected else theme["SURFACE_HOVER"],
             border_radius=8,
             padding=6,
         ),
@@ -367,33 +403,44 @@ def get_mode_tile(
             size=14,
             weight=ft.FontWeight.BOLD if is_selected else ft.FontWeight.W_600,
             color=theme["TEXT_PRIMARY"],
-            expand=True
+            expand=True,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            tooltip=title
         )
     ]
-    if badge_text:
-        header_row.append(get_badge(badge_text, color=theme["PRIMARY_COLOR"] if is_selected else theme["TEXT_MUTED"]))
 
     tile_shadow = (
         ft.BoxShadow(
             blur_radius=8,
             spread_radius=0,
-            color=f"{theme['PRIMARY_COLOR']}2B",
+            color=tint(theme['PRIMARY_COLOR'], "2B"),
             offset=ft.Offset(0, 2)
         )
         if is_selected
         else ft.BoxShadow(
             blur_radius=4,
             spread_radius=0,
-            color=theme.get("SHADOW_COLOR", "#0000001A"),
+            color=theme.get("SHADOW_COLOR", "#1A000000"),
             offset=ft.Offset(0, 1)
         )
     )
 
+    body = ft.Column([
+        ft.Row(header_row, vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+        ft.Text(desc, size=12, color=theme["TEXT_SECONDARY"] if is_selected else theme["TEXT_MUTED"], max_lines=2),
+    ], spacing=8)
+
+    # The badge sits in the tile footer instead of the header row: at four
+    # tiles per row the header badge squeezed the title to ~120px and long
+    # localized titles ("Стандартный поиск (SHA-256)") wrapped mid-word.
+    if badge_text:
+        body.controls.append(
+            ft.Row([get_badge(badge_text, color=theme["PRIMARY_COLOR"] if is_selected else theme["TEXT_MUTED"])])
+        )
+
     return ft.Container(
-        content=ft.Column([
-            ft.Row(header_row, alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
-            ft.Text(desc, size=12, color=theme["TEXT_SECONDARY"] if is_selected else theme["TEXT_MUTED"], max_lines=2),
-        ], spacing=8),
+        content=body,
         bgcolor=bg,
         border=ft.Border.all(2 if is_selected else 1, border_col),
         border_radius=12,
@@ -422,7 +469,7 @@ def get_segmented_control(
                 bgcolor=theme["PRIMARY_COLOR"] if is_active else "transparent",
                 border_radius=7,
                 padding=ft.Padding.symmetric(horizontal=14, vertical=7),
-                shadow=ft.BoxShadow(blur_radius=6, spread_radius=0, color=f"{theme['PRIMARY_COLOR']}3D", offset=ft.Offset(0, 2)) if is_active else None,
+                shadow=ft.BoxShadow(blur_radius=6, spread_radius=0, color=tint(theme['PRIMARY_COLOR'], "3D"), offset=ft.Offset(0, 2)) if is_active else None,
                 on_click=lambda _, k=key: on_select(k),
                 ink=True
             )
@@ -448,7 +495,7 @@ def get_drive_chip(
     """
     theme = get_current_theme()
     eff_accent = accent_color or theme["PRIMARY_COLOR"]
-    bg = f"{eff_accent}1C" if is_selected else theme["SURFACE_CARD"]
+    bg = tint(eff_accent, "1C") if is_selected else theme["SURFACE_CARD"]
     border_col = eff_accent if is_selected else theme["BORDER_COLOR"]
     text_col = eff_accent if is_selected else theme["TEXT_PRIMARY"]
     icon_col = eff_accent if is_selected else theme["TEXT_SECONDARY"]
@@ -458,7 +505,7 @@ def get_drive_chip(
         content=ft.Row([
             ft.Icon(ft.Icons.STORAGE_ROUNDED, size=13, color=icon_col),
             ft.Text(drive_label, size=12, weight=ft.FontWeight.W_600, color=text_col),
-        ], spacing=5, alignment=ft.MainAxisAlignment.CENTER),
+        ], spacing=5, alignment=ft.MainAxisAlignment.CENTER, tight=True),
         bgcolor=bg,
         border=ft.Border.all(1, border_col),
         border_radius=7,
@@ -565,7 +612,7 @@ def get_styled_dialog(
         title_items.append(
             ft.Container(
                 content=ft.Icon(icon, size=18, color=eff_icon_col),
-                bgcolor=f"{eff_icon_col}20",
+                bgcolor=tint(eff_icon_col, "20"),
                 padding=6,
                 border_radius=8
             )

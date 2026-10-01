@@ -1,3 +1,4 @@
+import atexit
 import os
 import sys
 import sqlite3
@@ -75,6 +76,23 @@ class ScanCacheDB:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
         return self._local.conn
+
+    def close(self) -> None:
+        """Close this thread's cached connection (2.2d).
+
+        Connections are per-thread; a worker thread that finished its scan
+        calls close() so the sqlite handle (and its WAL files) are released
+        deterministically instead of waiting for the interpreter's GC. The
+        next use on the same thread transparently opens a fresh connection.
+        Idempotent — closing with no connection open on this thread is a
+        no-op, and a failed close still drops the stale handle."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            self._local.conn = None
 
     def get_file_hash(self, path: str, size: int, mtime: float, turbo: bool = False) -> Optional[str]:
         """Fetch cached hash if size and mtime match."""
@@ -181,17 +199,28 @@ class ScanCacheDB:
             "size_bytes": db_size
         }
 
-    def clear_cache(self):
-        """Wipe all cached hashes and vacuum database."""
+    def clear_cache(self) -> bool:
+        """Wipe all cached hashes and vacuum database.
+
+        Returns True only when the wipe actually succeeded — the caller
+        (Settings) reports success/failure based on this (2.1b: a void
+        return made the «cache cleared» dialog unconditional)."""
         try:
             conn = self._get_connection()
             with conn:
                 conn.execute("DELETE FROM file_hashes;")
                 conn.execute("DELETE FROM image_phashes;")
             conn.execute("VACUUM;")
+            return True
         except Exception as ex:
             # User-initiated action: a silent failure here would leave the user
             # convinced the cache was wiped when it was not.
             logger.warning("cache clear failed: %s", ex)
+            return False
 
 cache_db = ScanCacheDB()
+
+# Release the main thread's connection on a normal app exit: a clean sqlite
+# close checkpoints and removes the WAL files (worker threads close theirs
+# at scan end, see main.run_scan / main.run_sample_scan; 2.2d).
+atexit.register(cache_db.close)

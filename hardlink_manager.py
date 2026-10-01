@@ -3,7 +3,8 @@ import ctypes
 import ctypes.wintypes
 import glob
 import logging
-from typing import Tuple, List, Dict
+from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
 
 from scanner import get_file_hash
 from locales import get_text
@@ -34,7 +35,42 @@ def is_same_volume(path1: str, path2: str) -> bool:
     except Exception:
         return False
 
-def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[bool, str, int]:
+
+@dataclass(frozen=True)
+class SourceHashSnapshot:
+    """A file's SHA-256 plus the stat fingerprint (size + mtime_ns) of the
+    moment the hash was computed. Lets a batch caller reuse one hash across
+    a whole duplicate group while replace_with_hardlink revalidates it
+    cheaply via os.stat before trusting it (M5)."""
+    file_hash: str
+    size: int
+    mtime_ns: int
+
+
+def _snapshot_file_hash(path: str) -> Optional[SourceHashSnapshot]:
+    """Computes the SHA-256 of ``path`` and captures a stat snapshot for
+    later cheap revalidation (M5).
+
+    The stat is taken BEFORE hashing: any modification during or after the
+    read changes size/mtime, so the later revalidation fails and the hash
+    is recomputed instead of trusted. Returns None if the file cannot be
+    stat'ed or hashed — callers then fall back to hashing at use time.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    file_hash = get_file_hash(path)
+    if not file_hash:
+        return None
+    return SourceHashSnapshot(file_hash=file_hash, size=st.st_size, mtime_ns=st.st_mtime_ns)
+
+
+def replace_with_hardlink(
+    source_original: str,
+    target_duplicate: str,
+    precomputed_src_hash: Optional[SourceHashSnapshot] = None,
+) -> Tuple[bool, str, int]:
     """
     Safely replaces duplicate file with an NTFS hardlink to the original file.
     Reclaims disk space without breaking file paths or deleting files from applications.
@@ -45,6 +81,12 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
 
     Refuses to link files whose content is not byte-identical: a hardlink between
     different content would silently destroy the duplicate's data (C1).
+
+    ``precomputed_src_hash`` (M5) lets a batch caller reuse the original's hash
+    computed once per group. It is trusted only after a cheap os.stat revalidation
+    (size + mtime must be unchanged since the hash was computed); otherwise the
+    hash is recomputed here. The duplicate is always hashed fresh — it is the
+    file being replaced.
 
     Returns (success, error_message, freed_bytes).
     """
@@ -80,7 +122,7 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
         logger.debug("samefile check failed for %s vs %s: %s", source_original, target_duplicate, ex)
 
     try:
-        src_size = os.path.getsize(source_original)
+        src_stat = os.stat(source_original)
         dup_size = os.path.getsize(target_duplicate)
     except OSError as ex:
         return False, str(ex), 0
@@ -88,9 +130,20 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
     # C1 guard: only byte-identical files may be hardlinked. Sizes must match
     # and full SHA-256 must match — this protects visually-similar (but
     # different) photos selected for hardlinking by mistake.
-    if src_size != dup_size:
+    if src_stat.st_size != dup_size:
         return False, get_text("hl_err_size_diff"), 0
-    src_hash = get_file_hash(source_original)
+    # M5: a group-level cached hash is trusted only if the original's stat
+    # (size + mtime) is unchanged since the hash was computed; otherwise the
+    # hash is recomputed. The duplicate is always hashed fresh — it is the
+    # file being replaced, so it is re-verified at operation time.
+    if (
+        precomputed_src_hash is not None
+        and precomputed_src_hash.size == src_stat.st_size
+        and precomputed_src_hash.mtime_ns == src_stat.st_mtime_ns
+    ):
+        src_hash = precomputed_src_hash.file_hash
+    else:
+        src_hash = get_file_hash(source_original)
     dup_hash = get_file_hash(target_duplicate)
     if not src_hash or not dup_hash or src_hash != dup_hash:
         return False, get_text("hl_err_content_diff"), 0
@@ -158,6 +211,9 @@ def replace_with_hardlink(source_original: str, target_duplicate: str) -> Tuple[
 def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[int, int, List[str], List[str]]:
     """
     Processes duplicate groups: keeps group[0] as original and hardlinks group[1:].
+    The original's SHA-256 is computed once per group and passed to each pair,
+    where it is revalidated cheaply via stat (size + mtime) before being
+    trusted (M5) — a mid-batch rewrite of the original is still caught.
     Returns (success_count, freed_bytes, errors, succeeded_paths).
     """
     success_count = 0
@@ -170,6 +226,9 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
             errors.append(get_text("hl_err_original_missing").format(original))
             continue
 
+        # M5: hash the original once per group instead of once per pair.
+        src_snapshot = _snapshot_file_hash(original)
+
         for dup in duplicates:
             # Already the same physical file (a pre-existing hardlink): there
             # is nothing to free, and journaling it would let "undo" unlink
@@ -179,7 +238,7 @@ def batch_replace_with_hardlinks(groups_to_link: Dict[str, List[str]]) -> Tuple[
                     continue
             except OSError:
                 pass
-            ok, err, freed = replace_with_hardlink(original, dup)
+            ok, err, freed = replace_with_hardlink(original, dup, precomputed_src_hash=src_snapshot)
             if ok:
                 success_count += 1
                 freed_bytes += freed

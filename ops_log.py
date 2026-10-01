@@ -116,6 +116,12 @@ def undo_move_operation(op_id: str) -> Tuple[int, List[str]]:
             if os.path.exists(source):
                 errors.append(f"Target already exists: {source}")
                 continue
+            # The source folder may have been removed (e.g. by the
+            # "remove emptied folders" option after the move) — restore the
+            # original layout instead of failing the undo.
+            parent = os.path.dirname(source)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             shutil.move(dest, source)
             restored += 1
         except Exception as ex:
@@ -168,6 +174,12 @@ def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
                     # Path was recreated by the user afterwards - leave it untouched.
                     continue
             else:
+                # The duplicate's folder may have been removed after the
+                # linking (e.g. by the "remove emptied folders" option) —
+                # recreate it so undo still restores the separate copy.
+                parent = os.path.dirname(duplicate)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
                 shutil.copy2(original, duplicate)
             restored += 1
         except Exception as ex:

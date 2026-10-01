@@ -7,10 +7,12 @@ from ui.components import (
     THEMES,
     format_path_short,
     get_active_theme_key,
+    get_badge,
     get_current_theme,
     get_detected_drives,
     get_styled_dialog,
     set_active_theme,
+    tint,
 )
 
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
@@ -51,6 +53,50 @@ class TestThemes:
     def test_palette_aliases_match_theme(self):
         for key in components._PALETTE_KEYS:
             assert getattr(components, key) == THEMES[get_active_theme_key()][key]
+
+
+class TestSetActiveThemeIsolation:
+    """2.2c: set_active_theme used to scan ALL of sys.modules and rewrite any
+    attribute whose VALUE matched the old palette — third-party modules that
+    happened to hold the same string were silently corrupted. Only this
+    module and the first-party palette consumers may be updated."""
+
+    def test_foreign_modules_are_never_touched(self):
+        import sys
+        import types
+
+        foreign = types.ModuleType("dup_theme_probe")
+        dark = THEMES["dark_slate"]
+        # Both a palette-key-named attribute and a differently-named one
+        # hold old-palette strings: neither may be rewritten.
+        foreign.PRIMARY_COLOR = dark["PRIMARY_COLOR"]
+        foreign.MY_PAINT = dark["ACCENT_COLOR"]
+        sys.modules["dup_theme_probe"] = foreign
+        try:
+            set_active_theme("light_clean")
+            assert foreign.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+            assert foreign.MY_PAINT == dark["ACCENT_COLOR"]
+            # Switch twice — still no trace after returning to the start.
+            set_active_theme("dark_slate")
+            assert foreign.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+            assert foreign.MY_PAINT == dark["ACCENT_COLOR"]
+        finally:
+            set_active_theme("dark_slate")
+            del sys.modules["dup_theme_probe"]
+
+    def test_own_module_and_consumers_update(self):
+        import ui.search_view  # a real `from ui.components import PRIMARY_COLOR` consumer
+        dark = THEMES["dark_slate"]
+        light = THEMES["light_clean"]
+        try:
+            set_active_theme("light_clean")
+            assert components.PRIMARY_COLOR == light["PRIMARY_COLOR"]
+            assert ui.search_view.PRIMARY_COLOR == light["PRIMARY_COLOR"]
+            assert get_current_theme() is light
+        finally:
+            set_active_theme("dark_slate")
+        assert components.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
+        assert ui.search_view.PRIMARY_COLOR == dark["PRIMARY_COLOR"]
 
 
 class TestFormatPathShort:
@@ -117,3 +163,23 @@ class TestStyledDialog:
         dlg = get_styled_dialog(title="t", content=body, width=400)
         assert isinstance(dlg.content, ft.Container)
         assert dlg.content.content is body
+
+
+class TestTint:
+    """Round 4 design fix: flet (like Flutter) parses 8-digit hex as
+    #AARRGGBB. Tints written as f"{COLOR}1C" (#RRGGBBAA) made the client read
+    the alpha byte as red — indigo tints rendered lime-green, translucent
+    shadows rendered fully transparent. tint() must emit alpha-first."""
+
+    def test_tint_is_alpha_first(self):
+        assert tint("#6366F1", "1C") == "#1C6366F1"
+
+    def test_tint_strips_hash_and_uppercases(self):
+        assert tint("6366f1", "22") == "#226366F1"
+
+    def test_non_hex_color_passes_through(self):
+        assert tint("transparent", "1C") == "transparent"
+
+    def test_badge_bgcolor_is_alpha_first(self):
+        badge = get_badge("x", color="#6366F1")
+        assert badge.bgcolor == "#226366F1"

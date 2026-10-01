@@ -1,4 +1,5 @@
 """Tests for scanner.py — hashing, grouping, filters, turbo verification."""
+import builtins
 import hashlib
 import os
 import threading
@@ -8,15 +9,18 @@ import pytest
 
 import scanner
 from scanner import (
+    BYTE_REFERENCE_CACHE_LIMIT,
     FileInfo,
     calculate_similarity,
     compare_byte_by_byte,
     compare_folders,
+    content_matches_bytes,
     format_file_size,
     get_file_category,
     get_file_hash,
     get_turbo_hash,
     is_system_path,
+    load_byte_reference,
     scan_directory,
     scan_for_sample,
 )
@@ -327,6 +331,224 @@ class TestScanDirectory:
         b.write_bytes(b"A" * block + b"MID-B" + b"A" * block)
         results = scan_directory([str(tmp_path)], by_byte=True)
         assert results == {}
+
+
+class TestBytePhaseM6:
+    """M6: the byte phase must read each file's content once (no reference
+    re-reads per candidate) and must not re-prove with bytes what a full
+    SHA-256 has already proven."""
+
+    def _count_binary_opens(self, monkeypatch, paths):
+        """Patches builtins.open, recording every binary-mode open of the
+        given files — the honest I/O unit for the byte phase, independent of
+        which internal function performs the comparison."""
+        watch = {os.path.normcase(p) for p in paths}
+        opens = []
+        real_open = builtins.open
+
+        def counting_open(file, mode="r", *args, **kwargs):
+            if "b" in mode:
+                norm = os.path.normcase(os.fspath(file))
+                if norm in watch:
+                    opens.append(norm)
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", counting_open)
+        return opens
+
+    def test_byte_only_reads_group_files_once(self, tmp_path, monkeypatch):
+        """M6 regression: in a byte-only group of n identical files the old
+        phase opened the reference once per candidate — 2(n-1) opens for
+        n=5. Contract now: each file is opened exactly once."""
+        content = b"M6 reference content" * 512
+        paths = []
+        for i in range(5):
+            p = tmp_path / f"g{i}.bin"
+            p.write_bytes(content)
+            paths.append(str(p))
+
+        opens = self._count_binary_opens(monkeypatch, paths)
+
+        results = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        (group,) = results.values()
+        assert {f.path for f in group} == set(paths)
+        # Every file really compared (guards against a fake shortcut)...
+        assert set(opens) == {os.path.normcase(p) for p in paths}
+        # ...and each at most once: the old code made 8 opens out of 5 files.
+        assert len(opens) <= 5
+
+    @pytest.mark.parametrize("turbo_mode,expected_opens", [(True, 4), (False, 2)])
+    def test_hash_and_byte_does_not_reprove_with_bytes(self, tmp_path, monkeypatch, turbo_mode, expected_opens):
+        """M6 semantics: with by_hash on, groups arrive already proven by a
+        full SHA-256 (turbo verification replaces partial hashes before
+        Phase 3), so the byte phase must not open the files again. Expected
+        opens = hashing only: one full-SHA256 pass per file, plus one
+        partial pass per file in turbo mode. The old byte pass added 2."""
+        content = b"M6 proof content" * 512
+        paths = []
+        for name in ("p0.bin", "p1.bin"):
+            p = tmp_path / name
+            p.write_bytes(content)
+            paths.append(str(p))
+
+        opens = self._count_binary_opens(monkeypatch, paths)
+
+        results = scan_directory(
+            [str(tmp_path)], by_hash=True, by_byte=True,
+            turbo_mode=turbo_mode, use_cache=False,
+        )
+
+        (group,) = results.values()
+        assert {f.path for f in group} == set(paths)
+        assert len(opens) == expected_opens
+
+    @pytest.mark.parametrize("turbo_mode", [True, False])
+    def test_hash_and_byte_groups_equal_byte_only(self, tmp_path, turbo_mode):
+        """M6 equivalence: skipping the byte pass for hash-proven groups
+        must yield exactly the groups a literal byte-only scan produces on
+        the same tree (same size everywhere: 3xA, 2xB, 1xC alone)."""
+        for i in range(3):
+            (tmp_path / f"a{i}.bin").write_bytes(b"A" * 5000)
+        for i in range(2):
+            (tmp_path / f"b{i}.bin").write_bytes(b"B" * 5000)
+        (tmp_path / "c.bin").write_bytes(b"C" * 5000)
+
+        hash_and_byte = scan_directory(
+            [str(tmp_path)], by_hash=True, by_byte=True,
+            turbo_mode=turbo_mode, use_cache=False,
+        )
+        byte_only = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        def memberships(results):
+            return sorted(sorted(f.path for f in files) for files in results.values() if len(files) > 1)
+
+        assert memberships(hash_and_byte) == memberships(byte_only)
+        assert memberships(byte_only) == [
+            sorted(str(tmp_path / f"a{i}.bin") for i in range(3)),
+            sorted(str(tmp_path / f"b{i}.bin") for i in range(2)),
+        ]
+
+    def test_byte_only_splits_same_size_late_difference(self, tmp_path):
+        """M6 correctness: identical size with the difference deep inside
+        the file (past the first chunk boundary) must still split — the
+        cached-reference comparison must walk every chunk before declaring
+        a match."""
+        shared_head = b"S" * 100000
+        for name, tail in (("a1", b"A" * 50000), ("a2", b"A" * 50000),
+                           ("b1", b"B" * 50000), ("b2", b"B" * 50000)):
+            (tmp_path / f"{name}.bin").write_bytes(shared_head + tail)
+
+        results = scan_directory([str(tmp_path)], by_hash=False, by_byte=True, use_cache=False)
+
+        pairs = sorted(
+            tuple(sorted(os.path.basename(f.path) for f in files))
+            for files in results.values()
+        )
+        assert pairs == [("a1.bin", "a2.bin"), ("b1.bin", "b2.bin")]
+
+    def test_byte_only_cancel_mid_group_returns_empty(self, tmp_path, monkeypatch):
+        """Stage-1 review follow-up: cancel must be honored INSIDE the
+        subgroup loop — the old code only checked between groups, so one
+        huge group kept comparing after the user pressed Cancel."""
+        for name, content in (("a", b"C" * 1000), ("b", b"C" * 1000),
+                              ("c", b"C" * 1000), ("d", b"D" * 1000),
+                              ("e", b"D" * 1000), ("f", b"D" * 1000)):
+            (tmp_path / f"{name}.bin").write_bytes(content)
+
+        cancel_flag = [False]
+        real_cmp = scanner.content_matches_bytes
+
+        def cancelling_cmp(expected, path, buffer_size=65536):
+            cancel_flag[0] = True  # the user pressed Cancel mid-group
+            return real_cmp(expected, path, buffer_size)
+
+        monkeypatch.setattr(scanner, "content_matches_bytes", cancelling_cmp)
+
+        results = scan_directory(
+            [str(tmp_path)], by_hash=False, by_byte=True,
+            use_cache=False, cancel_flag=cancel_flag,
+        )
+        assert results == {}
+
+
+class TestContentMatchesBytesEdges:
+    """Stage-1 review follow-up: the boundary contract of the RAM-compare
+    helper (M6) — pinned before the byte-phase changes touch it."""
+
+    def test_empty_reference_matches_empty_file(self, tmp_path):
+        p = tmp_path / "empty.bin"
+        p.write_bytes(b"")
+        assert content_matches_bytes(b"", str(p)) is True
+
+    def test_empty_reference_rejects_nonempty_file(self, tmp_path):
+        p = tmp_path / "x.bin"
+        p.write_bytes(b"x")
+        assert content_matches_bytes(b"", str(p)) is False
+
+    def test_content_exactly_one_buffer(self, tmp_path):
+        """expected == one full chunk: the "file must end exactly where the
+        reference ends" check runs right after the chunk loop."""
+        chunk = bytes(range(256)) * 256  # 65536 = default buffer_size
+        p = tmp_path / "chunk.bin"
+        p.write_bytes(chunk)
+        assert content_matches_bytes(chunk, str(p)) is True
+
+    def test_difference_in_last_byte(self, tmp_path):
+        content = b"A" * 70000
+        p = tmp_path / "a.bin"
+        p.write_bytes(content)
+        expected = b"A" * 69999 + b"B"
+        assert content_matches_bytes(expected, str(p)) is False
+
+    def test_identical_multichunk_content(self, tmp_path):
+        payload = os.urandom(200_000)  # several buffer sizes
+        p = tmp_path / "r.bin"
+        p.write_bytes(payload)
+        assert content_matches_bytes(payload, str(p)) is True
+
+    def test_candidate_shorter_than_reference(self, tmp_path):
+        p = tmp_path / "short.bin"
+        p.write_bytes(b"A" * 100)
+        assert content_matches_bytes(b"A" * 101, str(p)) is False
+
+    def test_candidate_longer_than_reference(self, tmp_path):
+        p = tmp_path / "long.bin"
+        p.write_bytes(b"A" * 101)
+        assert content_matches_bytes(b"A" * 100, str(p)) is False
+
+    def test_missing_file_returns_false(self, tmp_path):
+        assert content_matches_bytes(b"A", str(tmp_path / "nope.bin")) is False
+
+
+class TestLoadByteReference:
+    """Stage-1 review follow-up: the reference snapshot must match the
+    INDEXED size — a file that changed on disk since indexing must not
+    anchor a subgroup with stale/shifted content (fall back to streaming)."""
+
+    def test_returns_content_when_size_matches(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"reference")
+        assert load_byte_reference(str(p), 9) == b"reference"
+
+    def test_shrunk_file_returns_none(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"123456789")  # 9 bytes on disk
+        assert load_byte_reference(str(p), 10) is None  # indexed as 10
+
+    def test_grown_file_returns_none(self, tmp_path):
+        p = tmp_path / "ref.bin"
+        p.write_bytes(b"1234567890")  # 10 bytes on disk
+        assert load_byte_reference(str(p), 9) is None  # indexed as 9
+
+    def test_unreadable_file_returns_none(self, tmp_path):
+        assert load_byte_reference(str(tmp_path / "nope.bin"), 5) is None
+
+    def test_oversized_reference_returns_none(self, tmp_path):
+        """Over the RAM cap: stream instead, regardless of disk content."""
+        p = tmp_path / "big.bin"
+        p.write_bytes(b"x" * 10)
+        assert load_byte_reference(str(p), BYTE_REFERENCE_CACHE_LIMIT + 1) is None
 
 
 class TestPhysicalFileDedup:

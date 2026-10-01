@@ -9,7 +9,9 @@ self.update() in the touched code paths is guarded.
 Data-safety: view models only — no real files are touched at all.
 """
 import os
+import time
 
+import flet as ft
 import pytest
 
 from scanner import FileInfo
@@ -324,7 +326,7 @@ class TestMoveProtectsOriginal:
         g = [make_info(str(tmp_path / "a0.bin"), 10),
              make_info(str(tmp_path / "a1.bin"), 10)]
         moves = []
-        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append((entries, dest)))
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: moves.append((entries, dest)))
         view.selected_paths = {g[0].path, g[1].path}  # user selected ALL
 
         view._do_move(str(tmp_path / "dest"))
@@ -341,7 +343,7 @@ class TestMoveProtectsOriginal:
              make_info(str(tmp_path / "a1.bin"), 10),
              make_info(str(tmp_path / "a2.bin"), 10)]
         moves = []
-        view = make_view({"k": g}, on_move=lambda entries, dest: moves.append(entries))
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: moves.append(entries))
         view.selected_paths = {g[2].path}  # only one, original safe
 
         view._do_move(str(tmp_path / "dest"))
@@ -449,3 +451,201 @@ class TestExportFormats:
             view.write_export_file(str(tmp_path), "txt")
         # Swallowed for the UI, but it MUST surface in the log.
         assert any("Export error" in r.message for r in caplog.records)
+
+
+class TestRemoveEmptyFoldersOption:
+    """Round 4: 'Remove emptied folders' is opt-in (default off) in both the
+    delete and the move confirm dialogs, and its value reaches the callbacks."""
+
+    @staticmethod
+    def _fake_page():
+        class FakePage:
+            def __init__(self):
+                self.dialogs = []
+
+            def show_dialog(self, d):
+                self.dialogs.append(d)
+
+            def pop_dialog(self):
+                return self.dialogs.pop() if self.dialogs else None
+
+        return FakePage()
+
+    @staticmethod
+    def _remove_empty_checkbox(dialog):
+        """The new checkbox — identified by its tooltip, not by position
+        (warning banners may be inserted into the same content column)."""
+        return next(c for c in dialog.content.controls if isinstance(c, ft.Checkbox) and c.tooltip)
+
+    def test_delete_dialog_default_off_and_forwarded(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_delete=lambda *a, **k: calls.append(k))
+        view.selected_paths = {g[1].path}
+        page = self._fake_page()
+        view._page_or_none = lambda: page
+
+        view.on_delete_clicked(None)
+        dialog = page.dialogs[0]
+        assert self._remove_empty_checkbox(dialog).value is False  # opt-in
+
+        dialog.actions[-1].on_click(None)  # confirm
+        assert len(calls) == 1
+        assert calls[0].get("remove_empty_folders") is False
+
+    def test_delete_dialog_checked_flag_forwarded(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_delete=lambda *a, **k: calls.append(k))
+        view.selected_paths = {g[1].path}
+        page = self._fake_page()
+        view._page_or_none = lambda: page
+
+        view.on_delete_clicked(None)
+        dialog = page.dialogs[0]
+        self._remove_empty_checkbox(dialog).value = True
+
+        dialog.actions[-1].on_click(None)
+        assert calls[0].get("remove_empty_folders") is True
+
+    def test_move_forwards_remove_empty_flag(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: calls.append(kw))
+        view.selected_paths = {g[1].path}
+
+        view._do_move(str(tmp_path / "dest"), remove_empty=True)
+        assert calls == [{"remove_empty_folders": True}]
+
+    def test_move_default_flag_is_off(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        calls = []
+        view = make_view({"k": g}, on_move=lambda entries, dest, **kw: calls.append(kw))
+        view.selected_paths = {g[1].path}
+
+        view._do_move(str(tmp_path / "dest"))
+        assert calls == [{"remove_empty_folders": False}]
+
+
+class TestSearchDebounce:
+    """2.1c: on_search_change rebuilt and redrew the whole results column on
+    EVERY keystroke — an O(groups) render storm while typing. The refresh is
+    now deferred ~250 ms after the LAST keystroke; a newer keystroke cancels
+    (supersedes) the pending refresh."""
+
+    DELAY = 0.05  # instance-level override of SEARCH_DEBOUNCE_DELAY
+
+    def _view(self, tmp_path, monkeypatch):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        view.SEARCH_DEBOUNCE_DELAY = self.DELAY
+        return view
+
+    def test_refresh_deferred_until_typing_pauses(self, tmp_path, monkeypatch):
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+
+        view.search_field.value = "ph"
+        view.on_search_change(None)
+
+        assert refreshes == []  # not yet — the refresh is pending
+        time.sleep(self.DELAY + 0.15)
+        assert refreshes == ["ph"]
+
+    def test_rapid_keystrokes_collapse_into_one_refresh(self, tmp_path, monkeypatch):
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+
+        typed = ""
+        for ch in "photo":
+            typed += ch
+            view.search_field.value = typed
+            view.on_search_change(None)
+            time.sleep(0.01)  # well under the debounce delay
+
+        assert refreshes == []  # every keystroke reset the pending refresh
+        time.sleep(self.DELAY + 0.15)
+        assert refreshes == ["photo"]  # exactly one refresh, with the final query
+
+    def test_callback_outside_scheduled_timer_is_ignored(self, tmp_path, monkeypatch):
+        """The guard: only the timer that is CURRENTLY scheduled may perform
+        the refresh — a late/superseded callback must stay silent (the newer
+        timer owns the field)."""
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+        view.SEARCH_DEBOUNCE_DELAY = 60.0  # armed, never fires within the test
+
+        view.search_field.value = "old"
+        view.on_search_change(None)
+
+        # The armed timer's callback runs out-of-band (simulating the race
+        # where a newer keystroke replaced the reference first).
+        view._apply_search_query()
+        assert refreshes == []
+
+        view._search_debounce_timer.cancel()  # never fire the 60s timer
+
+
+class TestLightboxProgressive:
+    """2.1d: the lightbox used to ship the FULL-SIZE file to the client at
+    open time. It must open on the cached thumbnail (a small JPEG, usually
+    already generated for the result rows) and swap the full-size file in
+    right after. A failed thumbnail falls back to the original path — the
+    old behaviour is preserved."""
+
+    class _FakePage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            pass
+
+    def _view_with_page(self, tmp_path, monkeypatch):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        fake_page = self._FakePage()
+        monkeypatch.setattr(view, "_page_or_none", lambda: fake_page)
+        return view, fake_page
+
+    def test_opens_on_thumbnail_then_upgrades_to_full_size(self, tmp_path, monkeypatch):
+        view, fake_page = self._view_with_page(tmp_path, monkeypatch)
+        monkeypatch.setattr("ui.results_view.get_cached_thumbnail",
+                            lambda p, mtime=None: "THUMB_CACHE/small.jpg")
+        view.LIGHTBOX_FULL_IMAGE_DELAY = 0.05
+        image_path = str(tmp_path / "photo.jpg")
+
+        view.show_image_lightbox(image_path)
+
+        (dlg,) = fake_page.dialogs
+        assert dlg.content.content.src == "THUMB_CACHE/small.jpg"  # instant open
+        time.sleep(0.2)
+        assert dlg.content.content.src == image_path  # upgraded progressively
+
+    def test_thumbnail_failure_falls_back_to_original(self, tmp_path, monkeypatch):
+        """get_cached_thumbnail returns the original path when no preview can
+        be made — the lightbox must open on it exactly like the old code."""
+        view, fake_page = self._view_with_page(tmp_path, monkeypatch)
+        monkeypatch.setattr("ui.results_view.get_cached_thumbnail",
+                            lambda p, mtime=None: p)
+        view.LIGHTBOX_FULL_IMAGE_DELAY = 60.0  # keep the upgrade out of the test
+        image_path = str(tmp_path / "photo.jpg")
+
+        view.show_image_lightbox(image_path)
+
+        (dlg,) = fake_page.dialogs
+        assert dlg.content.content.src == image_path

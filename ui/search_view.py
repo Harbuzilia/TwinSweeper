@@ -1,8 +1,8 @@
 import flet as ft
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
-    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives,
-    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
+    get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives, tint,
+    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, WARNING_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
 
@@ -70,17 +70,36 @@ class SearchView(ft.Column):
 
         # Criteria Checkboxes
         self.check_size = ft.Checkbox(label=get_text("match_size", self.language), value=True)
-        self.check_hash = ft.Checkbox(label=get_text("match_hash", self.language), value=True)
+        self.check_hash = ft.Checkbox(label=get_text("match_hash", self.language), value=True, on_change=self._update_byte_only_warning)
         self.check_name = ft.Checkbox(label=get_text("match_name", self.language), value=False)
-        self.check_byte = ft.Checkbox(label=get_text("match_byte", self.language), value=False)
+        self.check_byte = ft.Checkbox(label=get_text("match_byte", self.language), value=False, on_change=self._update_byte_only_warning)
         self.check_turbo = ft.Checkbox(label=get_text("turbo_mode", self.language), value=True, tooltip=get_text("turbo_hint", self.language))
         self.check_ignore_empty = ft.Checkbox(label=get_text("ignore_empty_files", self.language), value=True)
+
+        # 2.1e: byte-only content matching (by_byte without by_hash) reads the
+        # FULL content of every candidate file. After M6 the reference is read
+        # once per subgroup, but the whole data volume still passes through
+        # the disk — slow on large scans. Non-blocking by design: the banner
+        # informs, the scan always starts.
+        self.byte_only_warning = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.HOURGLASS_TOP_ROUNDED, color=WARNING_COLOR, size=18),
+                ft.Text(get_text("byte_only_warning", self.language), size=12, color=WARNING_COLOR, expand=True)
+            ], spacing=8),
+            bgcolor=f"{WARNING_COLOR}18",
+            border=ft.Border.all(1, f"{WARNING_COLOR}55"),
+            border_radius=8,
+            padding=10,
+            visible=False
+        )
 
         # Advanced Filters
         self.exclude_field = ft.TextField(
             label=get_text("exclude_filters", self.language),
             hint_text=get_text("exclude_filters_hint", self.language),
             border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
             bgcolor=SURFACE_HOVER,
             text_size=13,
             expand=True
@@ -92,6 +111,21 @@ class SearchView(ft.Column):
             value="0",
             width=160,
             border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
+            bgcolor=SURFACE_HOVER,
+            text_size=13,
+            keyboard_type=ft.KeyboardType.NUMBER
+        )
+
+        self.max_size_field = ft.TextField(
+            label=get_text("max_size_filter", self.language),
+            hint_text="0",
+            value="0",
+            width=160,
+            border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=8,
             bgcolor=SURFACE_HOVER,
             text_size=13,
             keyboard_type=ft.KeyboardType.NUMBER
@@ -104,8 +138,8 @@ class SearchView(ft.Column):
             chip_controls.append(
                 ft.Container(
                     content=ft.Text(f"+ {pat}", size=11, color=PRIMARY_COLOR, weight=ft.FontWeight.W_600),
-                    bgcolor=f"{PRIMARY_COLOR}15",
-                    border=ft.Border.all(1, f"{PRIMARY_COLOR}40"),
+                    bgcolor=tint(PRIMARY_COLOR, "15"),
+                    border=ft.Border.all(1, tint(PRIMARY_COLOR, "40")),
                     border_radius=12,
                     padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                     on_click=lambda _, p=pat: self.add_quick_exclude(p),
@@ -127,7 +161,7 @@ class SearchView(ft.Column):
                 ft.Divider(color=BORDER_COLOR),
                 ft.Row([self.check_turbo, self.check_ignore_empty], wrap=True),
                 ft.Divider(color=BORDER_COLOR),
-                ft.Row([self.exclude_field, self.min_size_field]),
+                ft.Row([self.exclude_field, self.min_size_field, self.max_size_field]),
                 self.quick_chips_row
             ], spacing=10),
             visible=False
@@ -244,6 +278,9 @@ class SearchView(ft.Column):
             self.check_byte.value = False
             self.check_turbo.value = True
 
+        # Preset changes criteria values — resync the byte-only banner.
+        self._update_byte_only_warning()
+
         self.build_ui()
         try:
             self.update()
@@ -293,7 +330,7 @@ class SearchView(ft.Column):
                         ft.Text(get_text("selected_folders", self.language), size=15, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
                         get_badge(f"{len(self.selected_directories)}", color=PRIMARY_COLOR),
                         ft.Container(expand=True),
-                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+                        ft.Row([ft.Text(get_text("quick_drive_add", self.language), size=12, color=TEXT_MUTED, weight=ft.FontWeight.W_500)] + drive_chips, spacing=6, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER)
                     ]),
                     self.folders_container if self.selected_directories else self.folders_empty_hint
                 ], spacing=10)
@@ -313,6 +350,10 @@ class SearchView(ft.Column):
                     self.advanced_container
                 ], spacing=12)
             ),
+
+            # Byte-only slow-scan warning (2.1e) — top level so it stays
+            # visible while the Advanced section is collapsed.
+            self.byte_only_warning,
 
             # Progress & Action Card
             get_progress_card(
@@ -376,6 +417,18 @@ class SearchView(ft.Column):
         self.toggle_advanced_btn.content = ft.Text(f"{'▲' if self.advanced_visible else '▼'} {get_text('advanced_settings', self.language)}")
         self.update()
 
+    def _update_byte_only_warning(self, e=None):
+        """Keep the byte-only banner in sync with the criteria checkboxes
+        (2.1e). Non-blocking: pure visibility, never gates the scan."""
+        self.byte_only_warning.visible = (
+            self.check_byte.value and not self.check_hash.value
+        )
+        if self.parent is not None:
+            try:
+                self.update()
+            except Exception:
+                pass
+
     def start_scan(self, e):
         if not self.selected_directories:
             self.progress_text.value = get_text("please_select_dir", self.language)
@@ -416,6 +469,26 @@ class SearchView(ft.Column):
                 self.update()
                 return
 
+        # Max size (KB): 0 / empty / negative means "no upper limit".
+        max_size_bytes = None
+        if self.max_size_field.value:
+            try:
+                max_kb = int(self.max_size_field.value)
+                max_size_bytes = max_kb * 1024 if max_kb > 0 else None
+                self.max_size_field.error_text = None
+                self.max_size_field.border_color = BORDER_COLOR
+            except ValueError:
+                self.max_size_field.error_text = get_text("error_invalid_number", self.language)
+                self.max_size_field.border_color = DANGER_COLOR
+                self.update()
+                return
+        if max_size_bytes is not None and max_size_bytes < min_size_bytes:
+            # min > max would silently scan nothing — say so instead.
+            self.max_size_field.error_text = get_text("error_max_below_min", self.language)
+            self.max_size_field.border_color = DANGER_COLOR
+            self.update()
+            return
+
         self.start_button.visible = False
         self.cancel_button.visible = True
         self.progress_bar.visible = True
@@ -425,6 +498,10 @@ class SearchView(ft.Column):
         self.status_icon.visible = True
         self.status_icon.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self.status_icon.color = PRIMARY_COLOR
+        # Resync the byte-only banner right before launch: it must be lit
+        # during the scan even if the state was set programmatically (2.1e,
+        # non-blocking — purely informational).
+        self._update_byte_only_warning()
         self.update()
 
         def setup_cancel(cancel_fn):
@@ -463,6 +540,7 @@ class SearchView(ft.Column):
             exclude_patterns=exclude_patterns,
             turbo_mode=self.check_turbo.value,
             min_size_bytes=min_size_bytes,
+            max_size_bytes=max_size_bytes,
             ignore_empty_files=self.check_ignore_empty.value,
             on_scan_finished=guarded_finished,
             is_phash=is_phash,
