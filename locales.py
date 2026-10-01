@@ -34,6 +34,7 @@ translations = {
         "match_size": "Match File Size",
         "match_hash": "Match Content Hash",
         "match_byte": "Paranoid Byte-by-Byte Verification",
+        "byte_only_warning": "Byte-only comparison (no content hash) reads the full content of every candidate file. The reference is read once per group, but the whole data volume still passes through the disk — expect large scans to be slow.",
         "turbo_mode": "⚡ Turbo Engine (Multi-threaded xxHash)",
         "turbo_hint": "Uses xxHash with 2-stage verification. Up to 20x faster on SSDs.",
         "ignore_empty_files": "Ignore 0-byte (empty) files",
@@ -150,6 +151,7 @@ translations = {
         "system_file": "System Protected File",
         "load_more": "Load More Groups",
         "showing_groups": "Showing {} of {} groups",
+        "show_more_items": "Show {} more",
         "wasted_distribution": "Wasted Space Distribution by Category",
 
         # Deletion & Safety
@@ -343,6 +345,7 @@ translations = {
         "match_hash": "По содержимому (Хеш)",
         "quick_drive_add": "Быстрый выбор диска:",
         "match_byte": "Параноидальная побайтовая сверка",
+        "byte_only_warning": "Побайтовое сравнение без хеша читает полное содержимое каждого файла-кандидата. Опорный файл читается один раз на группу, но весь объём данных всё равно проходит через диск — на больших объёмах поиск будет медленным.",
         "turbo_mode": "⚡ Турбо-движок (Многопоточный xxHash)",
         "turbo_hint": "Многопоточный xxHash с двухэтапной верификацией. В 10–20 раз быстрее на SSD.",
         "ignore_empty_files": "Пропускать файлы 0 байт (пустые)",
@@ -463,6 +466,7 @@ translations = {
         "system_file": "Защищенный системный файл",
         "load_more": "Загрузить ещё группы",
         "showing_groups": "Отображается {} из {} групп",
+        "show_more_items": "Показать ещё {}",
         "wasted_distribution": "Распределение занятого места по категориям",
 
         # Deletion & Safety

@@ -9,6 +9,7 @@ self.update() in the touched code paths is guarded.
 Data-safety: view models only — no real files are touched at all.
 """
 import os
+import time
 
 import pytest
 
@@ -449,3 +450,123 @@ class TestExportFormats:
             view.write_export_file(str(tmp_path), "txt")
         # Swallowed for the UI, but it MUST surface in the log.
         assert any("Export error" in r.message for r in caplog.records)
+
+
+class TestSearchDebounce:
+    """2.1c: on_search_change rebuilt and redrew the whole results column on
+    EVERY keystroke — an O(groups) render storm while typing. The refresh is
+    now deferred ~250 ms after the LAST keystroke; a newer keystroke cancels
+    (supersedes) the pending refresh."""
+
+    DELAY = 0.05  # instance-level override of SEARCH_DEBOUNCE_DELAY
+
+    def _view(self, tmp_path, monkeypatch):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        view.SEARCH_DEBOUNCE_DELAY = self.DELAY
+        return view
+
+    def test_refresh_deferred_until_typing_pauses(self, tmp_path, monkeypatch):
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+
+        view.search_field.value = "ph"
+        view.on_search_change(None)
+
+        assert refreshes == []  # not yet — the refresh is pending
+        time.sleep(self.DELAY + 0.15)
+        assert refreshes == ["ph"]
+
+    def test_rapid_keystrokes_collapse_into_one_refresh(self, tmp_path, monkeypatch):
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+
+        typed = ""
+        for ch in "photo":
+            typed += ch
+            view.search_field.value = typed
+            view.on_search_change(None)
+            time.sleep(0.01)  # well under the debounce delay
+
+        assert refreshes == []  # every keystroke reset the pending refresh
+        time.sleep(self.DELAY + 0.15)
+        assert refreshes == ["photo"]  # exactly one refresh, with the final query
+
+    def test_callback_outside_scheduled_timer_is_ignored(self, tmp_path, monkeypatch):
+        """The guard: only the timer that is CURRENTLY scheduled may perform
+        the refresh — a late/superseded callback must stay silent (the newer
+        timer owns the field)."""
+        view = self._view(tmp_path, monkeypatch)
+        refreshes = []
+        monkeypatch.setattr(view, "refresh_filtered_results",
+                            lambda: refreshes.append(view.search_query))
+        view.SEARCH_DEBOUNCE_DELAY = 60.0  # armed, never fires within the test
+
+        view.search_field.value = "old"
+        view.on_search_change(None)
+
+        # The armed timer's callback runs out-of-band (simulating the race
+        # where a newer keystroke replaced the reference first).
+        view._apply_search_query()
+        assert refreshes == []
+
+        view._search_debounce_timer.cancel()  # never fire the 60s timer
+
+
+class TestLightboxProgressive:
+    """2.1d: the lightbox used to ship the FULL-SIZE file to the client at
+    open time. It must open on the cached thumbnail (a small JPEG, usually
+    already generated for the result rows) and swap the full-size file in
+    right after. A failed thumbnail falls back to the original path — the
+    old behaviour is preserved."""
+
+    class _FakePage:
+        def __init__(self):
+            self.dialogs = []
+
+        def show_dialog(self, dlg):
+            self.dialogs.append(dlg)
+
+        def pop_dialog(self):
+            pass
+
+    def _view_with_page(self, tmp_path, monkeypatch):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g})
+        fake_page = self._FakePage()
+        monkeypatch.setattr(view, "_page_or_none", lambda: fake_page)
+        return view, fake_page
+
+    def test_opens_on_thumbnail_then_upgrades_to_full_size(self, tmp_path, monkeypatch):
+        view, fake_page = self._view_with_page(tmp_path, monkeypatch)
+        monkeypatch.setattr("ui.results_view.get_cached_thumbnail",
+                            lambda p, mtime=None: "THUMB_CACHE/small.jpg")
+        view.LIGHTBOX_FULL_IMAGE_DELAY = 0.05
+        image_path = str(tmp_path / "photo.jpg")
+
+        view.show_image_lightbox(image_path)
+
+        (dlg,) = fake_page.dialogs
+        assert dlg.content.content.src == "THUMB_CACHE/small.jpg"  # instant open
+        time.sleep(0.2)
+        assert dlg.content.content.src == image_path  # upgraded progressively
+
+    def test_thumbnail_failure_falls_back_to_original(self, tmp_path, monkeypatch):
+        """get_cached_thumbnail returns the original path when no preview can
+        be made — the lightbox must open on it exactly like the old code."""
+        view, fake_page = self._view_with_page(tmp_path, monkeypatch)
+        monkeypatch.setattr("ui.results_view.get_cached_thumbnail",
+                            lambda p, mtime=None: p)
+        view.LIGHTBOX_FULL_IMAGE_DELAY = 60.0  # keep the upgrade out of the test
+        image_path = str(tmp_path / "photo.jpg")
+
+        view.show_image_lightbox(image_path)
+
+        (dlg,) = fake_page.dialogs
+        assert dlg.content.content.src == image_path

@@ -5,7 +5,8 @@ import html
 import json
 import datetime
 import functools
-from typing import Dict, List, Set, Tuple
+import threading
+from typing import Dict, List, Optional, Set, Tuple
 from PIL import Image
 
 from scanner import FileInfo, is_system_path, format_file_size, compute_wasted_bytes
@@ -26,6 +27,13 @@ logger = get_logger(__name__)
 
 class ResultsView(ft.Column):
     GROUPS_PER_PAGE = 50
+    # 2.1c: keystroke debounce — rebuilding/redrawing the whole column is
+    # O(groups), so the refresh waits for a pause in typing.
+    SEARCH_DEBOUNCE_DELAY = 0.25
+    # 2.1d: the lightbox opens on the cached thumbnail and swaps the
+    # full-size file in after this beat (lets the client paint the preview
+    # before the original starts streaming).
+    LIGHTBOX_FULL_IMAGE_DELAY = 0.15
 
     def __init__(self, results: Dict[str, List[FileInfo]], on_back, on_delete, on_hardlink=None, on_move=None, language="ru", allow_hardlink: bool = True, trash_default: bool = True, content_verified: bool = True, trash_available: bool = True):
         super().__init__()
@@ -61,6 +69,8 @@ class ResultsView(ft.Column):
         self.active_category: str = "all"
         self.search_query: str = ""
         self.loaded_groups_count: int = 0
+        # Pending debounce timer for the search field (2.1c).
+        self._search_debounce_timer: Optional[threading.Timer] = None
 
         # Filter / sort / view state
         self.min_size_filter: int = 0
@@ -434,6 +444,23 @@ class ResultsView(ft.Column):
         self.refresh_filtered_results()
 
     def on_search_change(self, e):
+        # 2.1c: defer the (expensive, whole-column) refresh ~250 ms after the
+        # LAST keystroke — a newer keystroke cancels the pending refresh, so
+        # fast typing cannot trigger a render storm.
+        if self._search_debounce_timer is not None:
+            self._search_debounce_timer.cancel()
+        timer = threading.Timer(self.SEARCH_DEBOUNCE_DELAY, self._apply_search_query)
+        timer.daemon = True
+        self._search_debounce_timer = timer
+        timer.start()
+
+    def _apply_search_query(self):
+        # Only the timer that is CURRENTLY scheduled may run the refresh: a
+        # callback racing a newer keystroke (fired just before cancel())
+        # must stay silent — the newer timer owns the field now.
+        if self._search_debounce_timer is not threading.current_thread():
+            return
+        self._search_debounce_timer = None
         self.search_query = self.search_field.value.lower().strip()
         self.refresh_filtered_results()
 
@@ -963,12 +990,20 @@ class ResultsView(ft.Column):
         def close_modal(e):
             page.pop_dialog()
 
+        # 2.1d progressive open: the cached thumbnail is a small JPEG that is
+        # usually already generated for the result rows, so the dialog paints
+        # instantly; the full-size file is swapped in right after.
+        # get_cached_thumbnail itself falls back to the original path when no
+        # preview can be made (corrupt image, read-only cache dir) — the old
+        # behaviour is preserved.
+        image = ft.Image(src=get_cached_thumbnail(image_path), fit=ft.BoxFit.CONTAIN)
+
         dlg = get_styled_dialog(
             title=os.path.basename(image_path),
             icon=ft.Icons.IMAGE_ROUNDED,
             icon_color=PRIMARY_COLOR,
             content=ft.Container(
-                content=ft.Image(src=image_path, fit=ft.BoxFit.CONTAIN),
+                content=image,
                 width=600,
                 height=450,
             ),
@@ -978,6 +1013,18 @@ class ResultsView(ft.Column):
             ]
         )
         page.show_dialog(dlg)
+
+        def upgrade_to_full_size():
+            try:
+                image.src = image_path
+                image.update()
+            except Exception as ex:
+                # The dialog keeps showing the thumbnail it opened with.
+                logger.debug("lightbox full-size swap failed for %s: %s", image_path, ex)
+
+        timer = threading.Timer(self.LIGHTBOX_FULL_IMAGE_DELAY, upgrade_to_full_size)
+        timer.daemon = True
+        timer.start()
 
     def open_file_natively(self, path: str):
         try:

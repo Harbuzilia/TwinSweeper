@@ -5,7 +5,7 @@ from typing import Optional
 from scanner import format_file_size
 from ui.components import (
     SIMILARITY_COLOR,
-    get_styled_card, get_stat_card, get_primary_button, get_header_row, get_badge,
+    get_styled_card, get_stat_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
     get_segmented_control, get_drive_chip, get_progress_card, format_path_short, get_detected_drives,
     PRIMARY_COLOR, ACCENT_COLOR, SUCCESS_COLOR, WARNING_COLOR, DANGER_COLOR, INFO_COLOR,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
@@ -13,6 +13,10 @@ from ui.components import (
 from locales import get_text
 
 class CompareView(ft.Column):
+    # Folder trees run to tens of thousands of files: rendering one Control
+    # per file froze the tab. Rows are paged like results_view/sweeper_view.
+    ITEMS_PER_PAGE = 50
+
     def __init__(self, on_compare_start, language="ru"):
         super().__init__()
         self.on_compare_start = on_compare_start
@@ -22,6 +26,8 @@ class CompareView(ft.Column):
         self.folder_b: Optional[str] = None
         self.comparison_data = None
         self.active_tab = "common"
+        # How many rows of the ACTIVE tab are rendered (pagination state).
+        self.loaded_items_count: int = 0
 
         self.scroll = ft.ScrollMode.AUTO
         self.expand = True
@@ -229,6 +235,8 @@ class CompareView(ft.Column):
         # A new comparison starts on the summary tab — the previous result's
         # tab choice must not leak into it.
         self.active_tab = "common"
+        # ...and its pagination starts over at the first page.
+        self.loaded_items_count = self.ITEMS_PER_PAGE
 
         unique_a = results["unique_a"]
         unique_b = results["unique_b"]
@@ -303,9 +311,17 @@ class CompareView(ft.Column):
 
     def set_active_tab(self, tab: str):
         self.active_tab = tab
+        # Every tab has its own list — pagination starts over.
+        self.loaded_items_count = self.ITEMS_PER_PAGE
         if self.comparison_data:
             self.results_container.controls[-1] = self.build_active_tab_content()
             self.update()
+
+    def load_more_items(self, e):
+        """Reveal the next page of the active tab's rows (2.1a)."""
+        self.loaded_items_count += self.ITEMS_PER_PAGE
+        self.results_container.controls[-1] = self.build_active_tab_content()
+        self._safe_update()
 
     def build_active_tab_content(self) -> ft.Container:
         if not self.comparison_data:
@@ -316,7 +332,7 @@ class CompareView(ft.Column):
             items = self.comparison_data["common"]
             if not items:
                 rows.append(ft.Text(get_text("compare_no_common", self.language), color=TEXT_MUTED))
-            for item in items:
+            for item in items[:self.loaded_items_count]:
                 # Real compare_folders schema (H1): every common entry carries
                 # two FileInfo objects (file_a/file_b) plus similarity/newer/larger.
                 fa = item["file_a"]
@@ -357,7 +373,7 @@ class CompareView(ft.Column):
             items = self.comparison_data["unique_a"]
             if not items:
                 rows.append(ft.Text(get_text("compare_no_unique_a", self.language), color=TEXT_MUTED))
-            for f in items:
+            for f in items[:self.loaded_items_count]:
                 rows.append(
                     ft.Container(
                         content=ft.Row([
@@ -379,7 +395,7 @@ class CompareView(ft.Column):
             items = self.comparison_data["unique_b"]
             if not items:
                 rows.append(ft.Text(get_text("compare_no_unique_b", self.language), color=TEXT_MUTED))
-            for f in items:
+            for f in items[:self.loaded_items_count]:
                 rows.append(
                     ft.Container(
                         content=ft.Row([
@@ -396,6 +412,20 @@ class CompareView(ft.Column):
                         padding=ft.Padding.symmetric(horizontal=12, vertical=8)
                     )
                 )
+
+        # The "show N more" control — only while rows remain hidden.
+        if items and self.loaded_items_count < len(items):
+            rows.append(
+                ft.Row(
+                    [get_outlined_button(
+                        text=get_text("show_more_items", self.language).format(len(items) - self.loaded_items_count),
+                        on_click=self.load_more_items,
+                        icon=ft.Icons.EXPAND_MORE_ROUNDED,
+                        height=38
+                    )],
+                    alignment=ft.MainAxisAlignment.CENTER
+                )
+            )
 
         return get_styled_card(
             ft.Column(rows, spacing=8),

@@ -2,7 +2,7 @@ import flet as ft
 from ui.components import (
     get_styled_card, get_primary_button, get_outlined_button, get_header_row, get_badge,
     get_mode_tile, get_drive_chip, get_folder_list_item, get_progress_card, get_detected_drives,
-    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
+    PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, WARNING_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
 
@@ -70,11 +70,28 @@ class SearchView(ft.Column):
 
         # Criteria Checkboxes
         self.check_size = ft.Checkbox(label=get_text("match_size", self.language), value=True)
-        self.check_hash = ft.Checkbox(label=get_text("match_hash", self.language), value=True)
+        self.check_hash = ft.Checkbox(label=get_text("match_hash", self.language), value=True, on_change=self._update_byte_only_warning)
         self.check_name = ft.Checkbox(label=get_text("match_name", self.language), value=False)
-        self.check_byte = ft.Checkbox(label=get_text("match_byte", self.language), value=False)
+        self.check_byte = ft.Checkbox(label=get_text("match_byte", self.language), value=False, on_change=self._update_byte_only_warning)
         self.check_turbo = ft.Checkbox(label=get_text("turbo_mode", self.language), value=True, tooltip=get_text("turbo_hint", self.language))
         self.check_ignore_empty = ft.Checkbox(label=get_text("ignore_empty_files", self.language), value=True)
+
+        # 2.1e: byte-only content matching (by_byte without by_hash) reads the
+        # FULL content of every candidate file. After M6 the reference is read
+        # once per subgroup, but the whole data volume still passes through
+        # the disk — slow on large scans. Non-blocking by design: the banner
+        # informs, the scan always starts.
+        self.byte_only_warning = ft.Container(
+            content=ft.Row([
+                ft.Icon(ft.Icons.HOURGLASS_TOP_ROUNDED, color=WARNING_COLOR, size=18),
+                ft.Text(get_text("byte_only_warning", self.language), size=12, color=WARNING_COLOR, expand=True)
+            ], spacing=8),
+            bgcolor=f"{WARNING_COLOR}18",
+            border=ft.Border.all(1, f"{WARNING_COLOR}55"),
+            border_radius=8,
+            padding=10,
+            visible=False
+        )
 
         # Advanced Filters
         self.exclude_field = ft.TextField(
@@ -244,6 +261,9 @@ class SearchView(ft.Column):
             self.check_byte.value = False
             self.check_turbo.value = True
 
+        # Preset changes criteria values — resync the byte-only banner.
+        self._update_byte_only_warning()
+
         self.build_ui()
         try:
             self.update()
@@ -314,6 +334,10 @@ class SearchView(ft.Column):
                 ], spacing=12)
             ),
 
+            # Byte-only slow-scan warning (2.1e) — top level so it stays
+            # visible while the Advanced section is collapsed.
+            self.byte_only_warning,
+
             # Progress & Action Card
             get_progress_card(
                 status_icon=self.status_icon,
@@ -376,6 +400,18 @@ class SearchView(ft.Column):
         self.toggle_advanced_btn.content = ft.Text(f"{'▲' if self.advanced_visible else '▼'} {get_text('advanced_settings', self.language)}")
         self.update()
 
+    def _update_byte_only_warning(self, e=None):
+        """Keep the byte-only banner in sync with the criteria checkboxes
+        (2.1e). Non-blocking: pure visibility, never gates the scan."""
+        self.byte_only_warning.visible = (
+            self.check_byte.value and not self.check_hash.value
+        )
+        if self.parent is not None:
+            try:
+                self.update()
+            except Exception:
+                pass
+
     def start_scan(self, e):
         if not self.selected_directories:
             self.progress_text.value = get_text("please_select_dir", self.language)
@@ -425,6 +461,10 @@ class SearchView(ft.Column):
         self.status_icon.visible = True
         self.status_icon.icon = ft.Icons.HOURGLASS_TOP_ROUNDED
         self.status_icon.color = PRIMARY_COLOR
+        # Resync the byte-only banner right before launch: it must be lit
+        # during the scan even if the state was set programmatically (2.1e,
+        # non-blocking — purely informational).
+        self._update_byte_only_warning()
         self.update()
 
         def setup_cancel(cancel_fn):
