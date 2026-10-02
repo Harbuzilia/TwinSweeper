@@ -581,7 +581,7 @@ graph TD
 - [x] 5.3 version-info EXE
 - [ ] 5.4 скриншоты
 - [ ] 5.5 README polish
-- [ ] 5.6 docs/PRIVACY.md
+- [x] 5.6 docs/PRIVACY.md
 - [ ] 5.7 issue-шаблоны
 - [ ] 5.8 подпись кода (после решения №2)
 - [ ] 6.1 автоматический QA-гейт
