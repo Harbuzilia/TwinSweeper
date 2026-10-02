@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-10-02 — Дымовой тест: сборка из чистого клона (задача 4.6)
+
+- **Файлы:** — (процедура; фиксация здесь и в `docs/RELEASE_PLAN.md`, чекбокс 4.6).
+- **Что:** свежий клон `github.com/Harbuzilia/TwinSweeper` (HEAD `b4540b9` =
+  origin/main, т.е. именно опубликованное состояние) во временную папку →
+  чистый venv (Python 3.14.6) → `pip install -r requirements-dev.txt` →
+  `python -m PyInstaller --noconfirm TwinSweeper.spec` → `dist\TwinSweeper.exe`
+  (~24.3 МБ) собран без ручных шагов. Иконка подтверждена в EXE
+  (`ExtractAssociatedIcon`, 32x32); version-info ресурс пуст — ожидаемо,
+  внедряется задачей 5.3; версия приложения — `APP_VERSION = "3.7.0"` в клоне.
+  EXE не запускался: статической проверки достаточно, реальные данные не
+  трогались. Клон удалён после фиксации результата.
+- **Почему:** критерий 4.6 «сборка из клона без ручных шагов» — доказано на
+  опубликованном состоянии GitHub: spec, иконка и зависимости полностью
+  версионируются, артефакты машины разработчика не нужны.
+- **Верификация:** PyInstaller exit 0 («Build complete»); `TwinSweeper.spec`
+  и `assets/icon.ico` присутствуют в клоне (доказательства 4.1/5.2); в
+  основном репо `pytest tests/ -q` — 494 passed, `ruff check .` — чисто
+  (код не менялся).
+
+---
+
 ## 2026-10-02 — Release-workflow: тег → GitHub Release (задача 4.5)
 
 - **Файлы:** `.github/workflows/release.yml` (новый), `docs/RELEASE_PLAN.md`

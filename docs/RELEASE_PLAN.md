@@ -575,7 +575,7 @@ graph TD
 - [x] 4.3 CI-матрица 3.12+3.14
 - [x] 4.4 SemVer 3.7.0 в app_info (SoT)
 - [x] 4.5 release.yml + CHANGELOG-релиз
-- [ ] 4.6 чистовая сборка из clean clone
+- [x] 4.6 чистовая сборка из clean clone
 - [x] 5.1 LICENSE (решение №1: MIT)
 - [x] 5.2 иконка + spec icon= (+ иконка окна, upx off — решение №5)
 - [ ] 5.3 version-info EXE
