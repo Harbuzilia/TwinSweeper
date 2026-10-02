@@ -4,6 +4,18 @@
 Новая запись добавляется сверху: дата → файлы → что именно изменено → почему.
 
 ---
+## 2026-10-02 — CI: mbcs-тест .lnk на нерусской ANSI-странице
+
+- **Файлы:** `tests/test_sweeper.py`.
+- **Что:** `test_ansi_encoded_target_decoded_via_mbcs` теперь делает
+  `pytest.skip`, если `"Я".encode("mbcs")` бросает `UnicodeEncodeError` —
+  на windows-latest (cp1252) кириллический target не кодируется в mbcs и
+  `make_lnk` падал в самом тесте. Смысл теста — регресс cp1251-fallback —
+  существует только на ANSI-страницах с кириллицей.
+- **Верификация:** `pytest tests/ -q` — 494 passed; `ruff check .` — чисто.
+
+---
+
 ## 2026-10-02 — SemVer 3.7.0 в app_info (задача 4.4)
 
 - **Файлы:** `app_info.py`, `docs/DEVELOPMENT.md`, `docs/RELEASE_PLAN.md`.

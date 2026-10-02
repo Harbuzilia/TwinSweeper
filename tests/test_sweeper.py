@@ -285,6 +285,15 @@ class TestShortcuts:
         """Round 2: real Windows writes LocalBasePath in the SYSTEM ANSI code
         page — the hardcoded cp1251 fallback garbled targets on non-Russian
         Windows and flagged working shortcuts as broken."""
+        try:
+            "Я".encode("mbcs")
+        except (UnicodeEncodeError, LookupError):
+            pytest.skip(
+                "system ANSI page (e.g. cp1252 on an English CI runner) cannot "
+                "encode Cyrillic, so an mbcs-encoded target is unrepresentable; "
+                "this cp1251-fallback regression only makes sense on ANSI pages "
+                "that cover Cyrillic"
+            )
         target = tmp_path / "Цель Анси.txt"
         target.write_text("x")
         lnk = make_lnk(tmp_path / "ansi.lnk", str(target), encoding="mbcs")
