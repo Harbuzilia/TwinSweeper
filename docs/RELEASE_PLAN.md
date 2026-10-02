@@ -570,14 +570,14 @@ graph TD
 - [ ] 3.1 fixture fresh_cache_db патчит синглтоны
 - [ ] 3.2 тесты ui/search_view.py
 - [ ] 3.3 тесты ui/sample_search_view.py
-- [ ] 4.1 Duplicater.spec в git
+- [x] 4.1 Duplicater.spec в git (теперь TwinSweeper.spec после ребрендинга)
 - [ ] 4.2 M4: BUILD.bat honest + spec SoT
 - [ ] 4.3 CI-матрица 3.12+3.14
 - [ ] 4.4 SemVer 3.7.0 в app_info (SoT)
 - [ ] 4.5 release.yml + CHANGELOG-релиз
 - [ ] 4.6 чистовая сборка из clean clone
-- [ ] 5.1 LICENSE (после решения №1)
-- [ ] 5.2 иконка + spec icon=
+- [x] 5.1 LICENSE (решение №1: MIT)
+- [x] 5.2 иконка + spec icon= (+ иконка окна, upx off — решение №5)
 - [ ] 5.3 version-info EXE
 - [ ] 5.4 скриншоты
 - [ ] 5.5 README polish
