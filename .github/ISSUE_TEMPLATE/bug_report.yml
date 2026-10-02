@@ -1,0 +1,77 @@
+name: Отчёт об ошибке
+description: Что-то работает не так, как заявлено
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за помощь! TwinSweeper полностью офлайн — телеметрии нет,
+        поэтому узнать о проблеме можно только из этого отчёта.
+  - type: input
+    id: version
+    attributes:
+      label: Версия TwinSweeper
+      description: 'Видна внизу левой панели окна, рядом с переключателем RU/EN (например, v3.7.0). Второй способ: правый клик по TwinSweeper.exe -> Свойства -> Подробно -> Версия файла.'
+      placeholder: 'v3.7.0'
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Версия Windows
+      description: 'Win+R, ввести winver, нажать Enter: окно покажет версию и сборку.'
+      placeholder: 'Windows 11 23H2, сборка 22631.xxxx'
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Чем точнее шаги, тем быстрее найдётся причина.
+      placeholder: |
+        1. Открыл приложение
+        2. Выбрал для проверки папку ...
+        3. Нажал «Найти дубликаты»
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидалось / получилось
+      description: Что должно было произойти и что произошло вместо этого. Если была ошибка — скопируйте её текст целиком.
+      placeholder: 'Ожидал: ... Получил: ...'
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Журнал twinsweeper.log
+      description: |
+        Журнал работы приложения — главный источник диагностики. Где найти:
+
+        - собранный EXE: `%LOCALAPPDATA%\TwinSweeper\twinsweeper.log`
+          (Win+R, вставить `%LOCALAPPDATA%\TwinSweeper`, Enter);
+        - запуск из исходников: файл `twinsweeper.log` в каталоге проекта.
+
+        Приложение офлайн: журнал никуда не отправляется и попадёт только в
+        этот issue. В журнале есть пути к вашим файлам — если не хотите
+        показывать их целиком, прикрепите фрагмент вокруг ошибки или просто
+        напишите, что журнала нет.
+      placeholder: 'Перетащите файл журнала в это поле или вставьте текст'
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Скриншоты
+      description: Если проблема видна на экране — перетащите картинки прямо в это поле.
+    validations:
+      required: false
+  - type: checkboxes
+    id: search-check
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: "Я поискал в [Issues](https://github.com/Harbuzilia/TwinSweeper/issues?q=is%3Aissue+sort%3Aupdated-desc) — такой проблемы ещё нет"
+          required: true

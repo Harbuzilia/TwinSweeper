@@ -1,0 +1,39 @@
+name: Предложение
+description: Идея новой функции или улучшения
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите сценарий использования — так проще понять, что именно
+        нужно добавить и зачем.
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Ваш сценарий
+      description: Ситуация и задача, с которой вы столкнулись.
+      placeholder: 'Например: фото с телефона дублируются в двух папках, и каждый раз приходится вручную ...'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что должно произойти
+      description: Как TwinSweeper должен себя вести, чтобы сценарий решался удобно.
+      placeholder: 'Приложение должно ...'
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Как обходитесь сейчас
+      description: 'Необязательно: чем решаете задачу сегодня — в TwinSweeper или другими средствами.'
+    validations:
+      required: false
+  - type: checkboxes
+    id: search-check
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: "Я поискал в [Issues](https://github.com/Harbuzilia/TwinSweeper/issues?q=is%3Aissue+sort%3Aupdated-desc) — такого предложения ещё нет"
+          required: true
