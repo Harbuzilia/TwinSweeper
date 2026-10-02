@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-10-03 — Version-info ресурс EXE: версия из app_info (задача 5.3)
+
+- **Файлы:** `TwinSweeper.spec`, `version_info.txt` (новый, генерируется
+  спеком на каждой сборке), `docs/RELEASE_PLAN.md` (чекбокс 5.3).
+- **Что:** spec — это python: импортирует `app_info.APP_NAME/APP_VERSION`,
+  строит `VSVersionInfo` и перезаписывает `version_info.txt`, путь которого
+  передаётся в `EXE(version='version_info.txt')`. FileVersion = ProductVersion
+  = 3.7.0.0 (кортеж из «3.7.0», дополненный нулём до 4 компонент),
+  FileDescription «TwinSweeper — поиск и безопасное удаление дубликатов»,
+  ProductName/InternalName «TwinSweeper», CompanyName «Harbuzilia»,
+  LegalCopyright «© Harbuzilia» (держатель как в MIT LICENSE),
+  OriginalFilename «TwinSweeper.exe», Translation en-US/Unicode.
+  `version_info.txt` руками не править — он перегенерируется.
+- **Почему:** единый источник правды — `app_info.py`: ресурс Properties →
+  Details не может разъехаться с версией приложения; до этого EXE не имел
+  version-ресурса вовсе (зафиксировано в записи задачи 4.6).
+- **Верификация:** пересборка `python -m PyInstaller --noconfirm
+  TwinSweeper.spec` — `(Get-Item dist\TwinSweeper.exe).VersionInfo`:
+  FileVersion/ProductVersion 3.7.0.0, ProductName, CompanyName,
+  OriginalFilename на месте; FileDescription проверен по code points
+  (кириллица и «—» в ресурсе точные — искажение было только в консоли);
+  SoT-тест: временный bump `APP_VERSION` → 3.7.1 → пересборка → ресурс
+  3.7.1.0 → откат → 3.7.0.0; `ruff check .` — чисто; `pytest tests/ -q` —
+  494 passed.
+
+---
+
 ## 2026-10-02 — Дымовой тест: сборка из чистого клона (задача 4.6)
 
 - **Файлы:** — (процедура; фиксация здесь и в `docs/RELEASE_PLAN.md`, чекбокс 4.6).

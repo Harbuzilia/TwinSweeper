@@ -578,7 +578,7 @@ graph TD
 - [x] 4.6 чистовая сборка из clean clone
 - [x] 5.1 LICENSE (решение №1: MIT)
 - [x] 5.2 иконка + spec icon= (+ иконка окна, upx off — решение №5)
-- [ ] 5.3 version-info EXE
+- [x] 5.3 version-info EXE
 - [ ] 5.4 скриншоты
 - [ ] 5.5 README polish
 - [ ] 5.6 docs/PRIVACY.md
