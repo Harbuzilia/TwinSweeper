@@ -4,6 +4,27 @@
 Новая запись добавляется сверху: дата → файлы → что именно изменено → почему.
 
 ---
+## 2026-10-02 — SemVer 3.7.0 в app_info (задача 4.4)
+
+- **Файлы:** `app_info.py`, `docs/DEVELOPMENT.md`, `docs/RELEASE_PLAN.md`.
+- **Что:** `APP_VERSION = "3.7"` → `"3.7.0"` — три компоненты нужны для
+  version-info EXE (задача 5.3) и тега релиза (4.5). Аудит потребителей
+  (`grep -rn "APP_VERSION" --include=*.py`): `main.py` (строка старта в логе,
+  «О программе», футер окна) и `ui/results_view.py` (подпись HTML-экспорта)
+  интерполируют версию как строку — никто не парсит 2-компонентный формат;
+  тестов на версию нет; `TwinSweeper.spec` версию не упоминает. README титул
+  версии не содержит (Release-бейдж берёт её из тегов) — синхронизация не
+  требуется. Косметика: `docs/DEVELOPMENT.md` «433 теста» → «494»; тело задачи
+  4.2 в `docs/RELEASE_PLAN.md`: `Duplicater.spec`/`dist\Duplicater.exe` →
+  `TwinSweeper.spec`/`dist\TwinSweeper.exe` (фактическое имя после ребрендинга).
+- **Почему:** единый источник версии (SoT) в строгом SemVer — фундамент для
+  5.3 (Properties → Details) и 6.3 (app_info = README = CHANGELOG = EXE-ресурс).
+- **Верификация:** `python -c "from app_info import APP_VERSION; assert
+  APP_VERSION == '3.7.0'"` — ок; `pytest tests/ -q` — 494 passed;
+  `ruff check .` — чисто.
+
+---
+
 ## 2026-10-02 — CI-матрица Python 3.12 + 3.14 (задача 4.3)
 
 - **Файлы:** `.github/workflows/ci.yml`, `docs/DEVELOPMENT.md`, `docs/RELEASE_PLAN.md`.

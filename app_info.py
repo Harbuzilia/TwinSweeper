@@ -2,4 +2,4 @@
 
 APP_NAME = "TwinSweeper"
 APP_TAGLINE = "Pro Disk Optimizer"
-APP_VERSION = "3.7"
+APP_VERSION = "3.7.0"

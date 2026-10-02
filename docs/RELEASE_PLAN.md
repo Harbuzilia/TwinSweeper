@@ -267,13 +267,13 @@ verify→act→journal в `finally`; тесты изолированы чере�
 - **Вход:** build-ветка ставит только `requirements.txt` (PyInstaller живёт в
   `requirements-dev.txt:5`) → на чистой машине `python -m PyInstaller` падает;
   ошибки pip глушатся (`>nul 2>&1`, `>nul`) → «BUILD COMPLETE» поверх провала;
-  сборка CLI-флагами (`BUILD.bat:58`) мимо `Duplicater.spec` (upx=True и
+  сборка CLI-флагами (`BUILD.bat:58`) мимо `TwinSweeper.spec` (upx=True и
   collect-all — только в spec) → два расходящихся источника сборки.
 - **Действия:** (a) build: `pip install -r requirements-dev.txt`; (b) убрать
   глушение stderr у pip/PyInstaller, после каждого шага `if errorlevel 1`
   → сообщение + `exit /b 1`; (c) сборка только
-  `python -m PyInstaller --noconfirm Duplicater.spec`; (d) пост-проверка
-  `if not exist dist\Duplicater.exe` → ошибка; (e) run-ветка (BUILD.bat:23):
+  `python -m PyInstaller --noconfirm TwinSweeper.spec`; (d) пост-проверка
+  `if not exist dist\TwinSweeper.exe` → ошибка; (e) run-ветка (BUILD.bat:23):
   не глушить ошибки pip; (f) удалить дублирующие CLI-флаги.
 - **Проверка:** на чистом venv: `BUILD.bat` → [2] → EXE создан и запускается;
   негативный тест: временно битый `requirements.txt` → скрипт падает с
@@ -573,7 +573,7 @@ graph TD
 - [x] 4.1 Duplicater.spec в git (теперь TwinSweeper.spec после ребрендинга)
 - [x] 4.2 M4: BUILD.bat honest + spec SoT
 - [x] 4.3 CI-матрица 3.12+3.14
-- [ ] 4.4 SemVer 3.7.0 в app_info (SoT)
+- [x] 4.4 SemVer 3.7.0 в app_info (SoT)
 - [ ] 4.5 release.yml + CHANGELOG-релиз
 - [ ] 4.6 чистовая сборка из clean clone
 - [x] 5.1 LICENSE (решение №1: MIT)

@@ -36,7 +36,7 @@ venv\Scripts\python -m pytest tests/ -q
 venv\Scripts\python -m ruff check .
 ```
 
-Базовая линия — **433 теста, все проходят**. Ожидаемое время прогона на
+Базовая линия — **494 теста, все проходят**. Ожидаемое время прогона на
 windows-latest: единицы секунд (реальная файловая система, без моков FS).
 
 Тот же пайплайн выполняет CI: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
