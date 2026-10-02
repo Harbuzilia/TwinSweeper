@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon_preview.png" width="128" alt="TwinSweeper" />
+</p>
+
 # TwinSweeper — Pro Disk Optimizer v3.7
 
 Настольное приложение для Windows (Python + [Flet](https://flet.dev)) для поиска и
