@@ -1,0 +1,101 @@
+name: Release
+
+# Tag push (v*) -> short gate -> PyInstaller EXE -> SHA256SUMS -> GitHub Release
+# (release plan 4.5). A tag is pushed only after the coordinator's checks:
+# rc first (e.g. v3.7.0-rc.1), then the stable vX.Y.Z.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # gh release create + asset upload.
+  contents: write
+
+jobs:
+  release:
+    # windows-latest: Windows-only app (os.startfile, mbcs, kernel32
+    # hardlinks); the EXE is built from TwinSweeper.spec exactly like the
+    # local BUILD.bat [2] build.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TAG_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.14 = the build version (project venv; also a CI matrix leg, 4.3).
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # Gate: Lint -> Test -> Build; the EXE is produced only when green.
+      - name: Lint (ruff)
+        run: python -m ruff check .
+
+      - name: Tests (pytest)
+        run: python -m pytest tests/ -q
+
+      - name: Build (PyInstaller)
+        run: python -m PyInstaller --noconfirm TwinSweeper.spec
+
+      - name: Verify build output
+        run: |
+          if (-not (Test-Path "dist/TwinSweeper.exe")) {
+            throw "dist/TwinSweeper.exe was not produced by PyInstaller"
+          }
+          Get-Item "dist/TwinSweeper.exe" | Select-Object Name, Length
+
+      - name: SHA256 checksums
+        run: |
+          $hash = (Get-FileHash "dist/TwinSweeper.exe" -Algorithm SHA256).Hash.ToLower()
+          # sha256sum format: lowercase hex hash + two spaces + file name.
+          "$hash  TwinSweeper.exe" | Out-File -FilePath SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+
+      - name: Release notes from CHANGELOG
+        run: |
+          $tag = $env:TAG_NAME
+          # v3.7.0-rc.1 -> 3.7.0: strip the v prefix and prerelease suffix
+          # to match the CHANGELOG section header for this version.
+          $version = ""
+          if ($tag -match "^v(\d+\.\d+\.\d+)") { $version = $Matches[1] }
+
+          $notes = $null
+          if ($version -and (Test-Path "CHANGELOG.md")) {
+            $raw = Get-Content -Raw -Encoding utf8 "CHANGELOG.md"
+            # Entries are separated by '---' lines, newest first; each entry
+            # starts with a '## date - title' header line.
+            $blocks = $raw -split "\r?\n---\r?\n"
+            foreach ($block in $blocks) {
+              $block = $block.Trim()
+              if (-not $block) { continue }
+              $head = ($block -split "\r?\n", 2)[0]
+              if ($head -like "## *" -and $head.Contains($version)) {
+                $notes = $block
+                break
+              }
+            }
+          }
+
+          if (-not $notes) {
+            $notes = "Changes: see [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$tag/CHANGELOG.md)."
+          }
+
+          $notes | Out-File -FilePath release-notes.md -Encoding utf8
+          Write-Host "--- release-notes.md ---"
+          Get-Content release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:TAG_NAME
+          # A hyphen in the tag (rc/beta, e.g. v3.7.0-rc.1) marks a
+          # prerelease; a clean vX.Y.Z is published as latest.
+          $flag = if ($tag.Contains("-")) { "--prerelease" } else { "--latest" }
+          gh release create $tag --title $tag $flag --notes-file release-notes.md "dist/TwinSweeper.exe" "SHA256SUMS.txt"

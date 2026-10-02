@@ -4,6 +4,40 @@
 Новая запись добавляется сверху: дата → файлы → что именно изменено → почему.
 
 ---
+
+## 2026-10-02 — Release-workflow: тег → GitHub Release (задача 4.5)
+
+- **Файлы:** `.github/workflows/release.yml` (новый), `docs/RELEASE_PLAN.md`
+  (чекбокс 4.5).
+- **Что:** push тега `v*` запускает джоб на windows-latest: install
+  requirements-dev → `ruff check .` + `pytest tests/ -q` (короткий гейт:
+  Lint→Test→Build — EXE собирается только при зелёных) →
+  `python -m PyInstaller --noconfirm TwinSweeper.spec` (Python 3.14 —
+  сборочная версия проекта) → проверка `dist\TwinSweeper.exe` (fail, если
+  нет) → `Get-FileHash` → `SHA256SUMS.txt` (sha256sum-формат
+  `<hash>` + два пробела + `TwinSweeper.exe`) → `gh release create`
+  (EXE + SHA256SUMS + ноты). Prerelease-детект: тег содержит `-`
+  (rc/beta) → `--prerelease`, чистый `vX.Y.Z` → `--latest`; title = тег.
+  Ноты: секция CHANGELOG, чей заголовок `##` содержит базовую версию тега
+  (`v3.7.0-rc.1` → `3.7.0`; блоки между `---`, newest-first); нет
+  совпадения — ссылка на CHANGELOG на теге. `permissions:
+  contents: write` + `GH_TOKEN` для `gh`.
+- **Почему:** релиз из тега воспроизводится одной командой
+  `git tag && git push --tags` (критерий 4.5) — без ручной сборки, загрузки
+  артефактов и подсчёта чексумм; ручной rc-релиз был источником сборки
+  только до первого тега.
+- **Верификация:** YAML распарсен PyYAML (валиден: tags `['v*']`,
+  `contents: write`, 10 шагов, python 3.14); PowerShell-фрагменты workflow
+  прогнаны локально на реальном `CHANGELOG.md` и `dist\TwinSweeper.exe`:
+  extraction `v3.7.0-rc.2` → секция «SemVer 3.7.0», `v0.0.0-rc.1` →
+  fallback-ссылка, UTF-8 без порчи; `Get-FileHash` совпал с hashlib
+  байт-в-байт, формат SHA256SUMS подтверждён; `pytest tests/ -q` —
+  494 passed; `ruff check .` — чисто; actionlint не установлен — пропущен
+  по условию задачи; полный прогон — на реальном теге (координатор,
+  тестовый rc-тег).
+
+---
+
 ## 2026-10-02 — CI: mbcs-тест .lnk на нерусской ANSI-странице
 
 - **Файлы:** `tests/test_sweeper.py`.
