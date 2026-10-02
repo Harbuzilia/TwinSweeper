@@ -8,7 +8,7 @@
 - Windows 10/11 (приложение использует `os.startfile`, `mbcs`, `ctypes kernel32`
   для хардлинков — на других ОС не запустится)
 - Python 3.12+ (`os.path.isjunction`); проект собирается и тестируется на 3.14,
-  CI гоняет 3.13
+  CI гоняет матрицу 3.12 + 3.14
 - Зависимости — в [`../requirements.txt`](../requirements.txt) (runtime) и
   [`../requirements-dev.txt`](../requirements-dev.txt) (pytest, ruff, pyinstaller,
   точные версии)
@@ -40,7 +40,7 @@ venv\Scripts\python -m ruff check .
 windows-latest: единицы секунд (реальная файловая система, без моков FS).
 
 Тот же пайплайн выполняет CI: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
-(ruff → pytest, `windows-latest`, Python 3.13).
+(ruff → pytest, `windows-latest`, матрица Python 3.12 + 3.14).
 
 ### Изоляция тестов от пользовательских данных
 

@@ -9,15 +9,23 @@ jobs:
     # windows-latest: the app is Windows-only (os.startfile, mbcs, ctypes
     # kernel32 hardlinks) and the suite exercises those paths.
     runs-on: windows-latest
+    strategy:
+      # 3.12 = release floor (os.path.isjunction, task 1.1), 3.14 = newest
+      # (local dev venv); 3.13 is covered by the range.
+      # fail-fast: false lets both legs run to completion for diagnosis;
+      # this is NOT continue-on-error -- a red job still fails the workflow.
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: python -m pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
         run: python -m ruff check .
