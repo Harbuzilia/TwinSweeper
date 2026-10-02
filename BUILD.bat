@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title TwinSweeper - Build & Run
+title TwinSweeper - Build ^& Run
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
 echo ║                   TWINSWEEPER BUILD TOOL                     ║
@@ -20,7 +20,12 @@ goto :eof
 :run
 echo.
 echo Starting TwinSweeper...
-python -m pip install -r requirements.txt >nul 2>&1
+python -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo ERROR: Failed to install dependencies from requirements.txt.
+    pause
+    exit /b 1
+)
 python main.py
 goto :eof
 
@@ -36,26 +41,58 @@ if %errorlevel% neq 0 (
     echo ERROR: Python is not found.
     echo Please install Python from https://python.org and add it to PATH.
     pause
-    exit /b
+    exit /b 1
 )
 
 REM 2. Create a virtual environment if needed
 if not exist venv (
     echo Creating virtual environment...
     python -m venv venv
+    if errorlevel 1 (
+        echo ERROR: Failed to create the virtual environment.
+        pause
+        exit /b 1
+    )
 )
 
 REM 3. Activate virtual environment
 call venv\Scripts\activate.bat
+if errorlevel 1 (
+    echo ERROR: Failed to activate the virtual environment.
+    pause
+    exit /b 1
+)
 
-REM 4. Install dependencies
+REM 4. Install dependencies (PyInstaller lives in requirements-dev.txt)
 echo Installing dependencies...
-python -m pip install --upgrade pip >nul
-python -m pip install -r requirements.txt
+python -m pip install --upgrade pip
+if errorlevel 1 (
+    echo ERROR: pip upgrade failed.
+    pause
+    exit /b 1
+)
+python -m pip install -r requirements-dev.txt
+if errorlevel 1 (
+    echo ERROR: Failed to install dependencies from requirements-dev.txt.
+    pause
+    exit /b 1
+)
 
-REM 5. Build the executable
+REM 5. Build the executable - TwinSweeper.spec is the single build source
 echo Building portable EXE with PyInstaller...
-python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name "TwinSweeper" main.py
+python -m PyInstaller --noconfirm TwinSweeper.spec
+if errorlevel 1 (
+    echo ERROR: PyInstaller build failed.
+    pause
+    exit /b 1
+)
+
+REM 6. Post-check: the executable must exist
+if not exist dist\TwinSweeper.exe (
+    echo ERROR: Build failed - dist\TwinSweeper.exe was not created.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ==========================================

@@ -571,7 +571,7 @@ graph TD
 - [x] 3.2 тесты ui/search_view.py
 - [x] 3.3 тесты ui/sample_search_view.py
 - [x] 4.1 Duplicater.spec в git (теперь TwinSweeper.spec после ребрендинга)
-- [ ] 4.2 M4: BUILD.bat honest + spec SoT
+- [x] 4.2 M4: BUILD.bat honest + spec SoT
 - [ ] 4.3 CI-матрица 3.12+3.14
 - [ ] 4.4 SemVer 3.7.0 в app_info (SoT)
 - [ ] 4.5 release.yml + CHANGELOG-релиз

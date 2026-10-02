@@ -4,6 +4,32 @@
 Новая запись добавляется сверху: дата → файлы → что именно изменено → почему.
 
 ---
+## 2026-10-02 — BUILD.bat: честные ошибки, сборка только через spec (4.2/M4)
+
+- **Файлы:** `BUILD.bat`, `docs/DEVELOPMENT.md`, `docs/RELEASE_PLAN.md`.
+- **Что:** build-ветка ставит `requirements-dev.txt` (PyInstaller раньше не
+  ставился — на чистом venv `python -m PyInstaller` падал); вывод pip/PyInstaller
+  не глушится, после каждого шага `if errorlevel 1` → сообщение + `exit /b 1`
+  (venv, активация, upgrade pip, зависимости, сборка); пост-проверка
+  `dist\TwinSweeper.exe`; run-ветка не глушит ошибки pip; сборка только
+  `python -m PyInstaller --noconfirm TwinSweeper.spec` — дублирующие CLI-флаги
+  (`--onefile --windowed --collect-all --name`) удалены (расходились со spec:
+  терялись icon и upx=False). Попутно два pre-existing дефекта того же файла:
+  `title ... & Run` давал `'Run' is not recognized` на каждом запуске (→ `^&`);
+  LF-only переводы строк + `chcp 65001` + мультибайтовый баннер давали мусор
+  парсинга (`'║' is not recognized`…) — файл переведён в CRLF (в git
+  нормализуется autocrlf, дифф остаётся семантическим).
+- **Почему:** раньше «BUILD COMPLETE» печатался поверх упавшей установки или
+  сборки, а два источника сборки (CLI-флаги vs spec) давали расходящиеся EXE;
+  единственный источник — spec (задача 4.1/4.2 плана).
+- **Верификация:** позитивный сценарий: `BUILD.bat` [2] — баннер чистый,
+  зависимости видны, PyInstaller собирает по spec (`Copying icon to EXE`),
+  «BUILD COMPLETE», exit 0, `dist\TwinSweeper.exe` пересоздан (26 595 730 байт,
+  21:16:52); негативный: спрятанный spec → `ERROR: Spec file "TwinSweeper.spec"
+  not found!` → `ERROR: PyInstaller build failed.`, exit 1, «BUILD COMPLETE» не
+  печатается; `pytest tests/ -q` — 494 passed; `ruff check .` — чисто.
+
+---
 ## 2026-10-02 — Тесты ui/sample_search_view (задача 3.3), 494 теста
 
 - **Файлы:** `tests/test_sample_search_view.py` (новый, 26 тестов), `docs/RELEASE_PLAN.md`.

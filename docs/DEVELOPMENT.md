@@ -69,18 +69,16 @@ BUILD.bat
 
 ```bat
 venv\Scripts\python -m pip install -r requirements-dev.txt
-venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name TwinSweeper main.py
-```
-
-**Источник истины для сборки — [`../TwinSweeper.spec`](../TwinSweeper.spec)**,
-а не длинная команда: в нём зафиксированы сборка `flet`, иконка окна
-(`assets/icon.ico` в `datas`, иначе в `_MEIPASS` её не найти) и `upx=False`
-(сжатый неподписанный EXE даёт заметно больше ложных срабатываний антивирусов).
-Идентичная сборка одной командой:
-
-```bat
 venv\Scripts\python -m PyInstaller --noconfirm TwinSweeper.spec
 ```
+
+**Единственный источник сборки — [`../TwinSweeper.spec`](../TwinSweeper.spec)**:
+в нём зафиксированы сборка `flet`, иконка окна (`assets/icon.ico` в `datas`,
+иначе в `_MEIPASS` её не найти) и `upx=False` (сжатый неподписанный EXE даёт
+заметно больше ложных срабатываний антивирусов). `BUILD.bat` вызывает именно
+эту команду; отдельной CLI-командой (`--onefile --windowed --collect-all`)
+проект больше не собирается — она расходилась со spec (терялись иконка и
+`upx=False`).
 
 Результат — `dist\TwinSweeper.exe`: работает на любом Windows-ПК без установленного
 Python. Данные приложения в frozen-сборке уходят в `%LOCALAPPDATA%\TwinSweeper`
