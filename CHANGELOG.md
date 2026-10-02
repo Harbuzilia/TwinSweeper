@@ -1,7 +1,37 @@
-# Журнал изменений — Duplicater
+# Журнал изменений — TwinSweeper
 
 **Правило:** этот файл обновляется после **каждого** изменения в проекте.
 Новая запись добавляется сверху: дата → файлы → что именно изменено → почему.
+
+---
+## 2026-10-02 — Ребрендинг Duplicater → TwinSweeper, подготовка к открытой публикации
+
+Продукт готовится к публикации на GitHub как публичный репозиторий **TwinSweeper**
+(MIT). Имя «Duplicater» — генерик, занятый десятками схожих утилит; «TwinSweeper»
+отличим и отражает суть (twin = дубликаты, sweep = очистка).
+
+### Что переименовано
+- `app_info.py` — `APP_NAME = "TwinSweeper"` (единый источник имени, используется About-диалогом).
+- `locales.py` — `app_title` RU+EN → «TwinSweeper — Pro Disk Optimizer»; строки контекстного меню Проводника (RU/EN).
+- `main.py` — winreg-ключи `Software\Classes\Directory\[\Background\]shell\TwinSweeper` (регистрация/удаление/проверка пункта меню); стартовое сообщение лога.
+- `db_cache.py` — каталог данных frozen-сборки: `%LOCALAPPDATA%\Duplicater` → `%LOCALAPPDATA%\TwinSweeper`.
+- `app_logging.py` — `LOG_FILE_NAME` → `twinsweeper.log`.
+- `ui/results_view.py` — заголовки экспортных отчётов TXT/HTML.
+- `BUILD.bat`, `README.md`, `.agent/AGENTS.md` — титулы, имена EXE, пути.
+- `Duplicater.spec` → `TwinSweeper.spec` (git mv; добавлен `icon='assets/icon.ico'` для будущей сборки).
+- `tests/` — префикс tmp-каталога изоляции, ожидание заголовка TXT-отчёта, тестовые данные.
+
+### Намеренно НЕ переименовано (совместимость)
+- Переменная окружения `DUPLICATER_DATA_DIR`: на неё опираются изоляция тестов
+  (`tests/conftest.py`) и CI; переименование молча сломало бы data-safety-контракт
+  тестов. Задокументировано в `db_cache.get_data_dir`.
+- Исторические записи этого журнала и `AUDIT_REPORT.md` — они фиксируют прошлое
+  состояние проекта, включая прежнее имя.
+
+### Верификация
+- `pytest`: **433 passed**; `ruff check .`: 0 замечаний.
+- `git grep -i duplicater` по отслеживаемым файлам: только `DUPLICATER_DATA_DIR`
+  и исторические документы.
 
 ---
 ## 2026-09-20 — Дизайн-раунд: системный баг цвета (flet AARRGGBB), серый ErrorWidget на экране результатов, полировка всех экранов, v3.7, 362 теста

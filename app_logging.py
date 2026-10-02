@@ -1,4 +1,4 @@
-"""Central logging for Duplicater.
+"""Central logging for TwinSweeper.
 
 `setup_logging()` is called once from main() and attaches a rotating file
 handler inside the app's data directory (the same place as scan_cache.db —
@@ -15,7 +15,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-LOG_FILE_NAME = "duplicater.log"
+LOG_FILE_NAME = "twinsweeper.log"
 MAX_BYTES = 1_000_000  # ~1 MB before rotation
 BACKUP_COUNT = 2
 

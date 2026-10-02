@@ -71,7 +71,7 @@ class TestThumbnailCache:
     def test_default_dir_lives_in_the_isolated_data_dir(self, isolated_data_dir):
         # Positive control: THUMBS_DIR is derived from get_data_dir(), which
         # conftest points at the throwaway dir — never the project/profile.
-        # (The old check matched the substring "duplicater", which the real
-        # project dir also contains — it proved nothing.)
+        # (The old check matched a substring that the real project dir
+        # also contains — it proved nothing.)
         assert THUMBS_DIR == os.path.join(get_data_dir(), "thumbs")
         assert os.path.normcase(THUMBS_DIR).startswith(os.path.normcase(isolated_data_dir))

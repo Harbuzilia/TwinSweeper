@@ -136,12 +136,12 @@ def is_context_menu_registered() -> bool:
     if not HAS_WINREG:
         return False
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\Duplicater"):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\TwinSweeper"):
             return True
     except OSError:
         return False
 
-def register_context_menu(app_title: str = "Найти дубликаты в Duplicater"):
+def register_context_menu(app_title: str = "Найти дубликаты в TwinSweeper"):
     if not HAS_WINREG:
         return False, "winreg not available"
     try:
@@ -154,13 +154,13 @@ def register_context_menu(app_title: str = "Найти дубликаты в Dup
             cmd = f'"{python_exe}" "{main_py}" "%1"'
             bg_cmd = f'"{python_exe}" "{main_py}" "%V"'
 
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\Duplicater") as key:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\shell\TwinSweeper") as key:
             winreg.SetValueEx(key, "", 0, winreg.REG_SZ, app_title)
             winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
             with winreg.CreateKey(key, "command") as cmd_key:
                 winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd)
 
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\Background\shell\Duplicater") as key:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\Directory\Background\shell\TwinSweeper") as key:
             winreg.SetValueEx(key, "", 0, winreg.REG_SZ, app_title)
             winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
             with winreg.CreateKey(key, "command") as cmd_key:
@@ -174,10 +174,10 @@ def unregister_context_menu():
         return False, "winreg not available"
     try:
         for subkey in [
-            r"Software\Classes\Directory\shell\Duplicater\command",
-            r"Software\Classes\Directory\shell\Duplicater",
-            r"Software\Classes\Directory\Background\shell\Duplicater\command",
-            r"Software\Classes\Directory\Background\shell\Duplicater"
+            r"Software\Classes\Directory\shell\TwinSweeper\command",
+            r"Software\Classes\Directory\shell\TwinSweeper",
+            r"Software\Classes\Directory\Background\shell\TwinSweeper\command",
+            r"Software\Classes\Directory\Background\shell\TwinSweeper"
         ]:
             try:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, subkey)
@@ -422,7 +422,7 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
 def main(page: ft.Page):
     # File log lives next to scan_cache.db (DUPLICATER_DATA_DIR redirects it in tests).
     setup_logging(get_data_dir())
-    logger.info("Duplicater %s started (log file initialized)", APP_VERSION)
+    logger.info("TwinSweeper %s started (log file initialized)", APP_VERSION)
 
     # Persisted settings (round 2: language/theme/trash default used to reset
     # to hardcoded values on every launch).

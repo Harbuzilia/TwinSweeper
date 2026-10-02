@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title Duplicater - Build & Run
+title TwinSweeper - Build & Run
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
-echo ║                   DUPLICATER BUILD TOOL                      ║
+echo ║                   TWINSWEEPER BUILD TOOL                     ║
 echo ╚══════════════════════════════════════════════════════════════╝
 echo.
 echo [1] Run Application (Development)
@@ -19,7 +19,7 @@ goto :eof
 
 :run
 echo.
-echo Starting Duplicater...
+echo Starting TwinSweeper...
 python -m pip install -r requirements.txt >nul 2>&1
 python main.py
 goto :eof
@@ -55,14 +55,14 @@ python -m pip install -r requirements.txt
 
 REM 5. Build the executable
 echo Building portable EXE with PyInstaller...
-python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name "Duplicater" main.py
+python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name "TwinSweeper" main.py
 
 echo.
 echo ==========================================
 echo BUILD COMPLETE!
 echo Your portable app is ready:
 echo.
-echo    dist\Duplicater.exe
+echo    dist\TwinSweeper.exe
 echo.
 echo This file works on any Windows PC without
 echo needing Python installed.

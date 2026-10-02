@@ -1351,7 +1351,7 @@ class ResultsView(ft.Column):
                     json.dump(data, f, ensure_ascii=False, indent=2)
             elif export_type == "txt":
                 with open(path, 'w', encoding='utf-8') as f:
-                    f.write(f"DUPLICATER REPORT - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+                    f.write(f"TWINSWEEPER REPORT - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
                     f.write(f"Total Duplicate Groups: {self.total_groups}\n")
                     f.write(f"Wasted Space: {format_file_size(self.total_wasted_bytes)}\n\n")
                     for key, files in self.all_results.items():
@@ -1380,7 +1380,7 @@ class ResultsView(ft.Column):
                     )
                 document = (
                     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                    "<title>Duplicater Report</title><style>"
+                    "<title>TwinSweeper Report</title><style>"
                     "body{font-family:'Segoe UI',Arial,sans-serif;margin:24px;background:#0f1218;color:#e6e9ef}"
                     "h1{font-size:20px;margin-bottom:4px}p{color:#8b93a7;font-size:12px}"
                     "table{border-collapse:collapse;width:100%;font-size:12px}"
@@ -1388,7 +1388,7 @@ class ResultsView(ft.Column):
                     "th{background:#1a2030}.num{text-align:right;white-space:nowrap}"
                     ".group td{background:#1a2030;font-weight:600}"
                     "</style></head><body>"
-                    "<h1>Duplicater Report</h1>"
+                    "<h1>TwinSweeper Report</h1>"
                     f"<p>{self.total_groups} groups · {html.escape(format_file_size(self.total_wasted_bytes))} reclaimable · v{APP_VERSION}</p>"
                     "<table><tr><th>File</th><th>Path</th><th>Size (bytes)</th><th>Size</th></tr>"
                     + "".join(group_rows) +

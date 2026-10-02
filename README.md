@@ -1,4 +1,4 @@
-# Duplicater — Pro Disk Optimizer v3.7
+# TwinSweeper — Pro Disk Optimizer v3.7
 
 Настольное приложение для Windows (Python + [Flet](https://flet.dev)) для поиска и
 безопасного удаления дубликатов файлов, похожих изображений и накопившегося мусора.
@@ -112,10 +112,10 @@ BUILD.bat
 (пункт `[2] Build Portable EXE`) — эквивалентно команде:
 
 ```bat
-venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name Duplicater main.py
+venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --collect-all flet --name TwinSweeper main.py
 ```
 
-Готовый файл: `dist\Duplicater.exe` — работает на любом Windows-ПК без установленного Python.
+Готовый файл: `dist\TwinSweeper.exe` — работает на любом Windows-ПК без установленного Python.
 
 ## Где хранятся данные приложения
 
@@ -124,10 +124,10 @@ venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --collect-al
 | `scan_cache.db` | SQLite-кэш хэшей (ускоряет повторные сканирования) |
 | `operations_log.json` | журнал операций удаления/хардлинков (основа для «Отменить») |
 | `scan_history.json` | история сканирований |
-| `duplicater.log` | журнал работы приложения (ротация ~1 МБ × 3) |
+| `twinsweeper.log` | журнал работы приложения (ротация ~1 МБ × 3) |
 
 - При запуске из исходников — в каталоге проекта.
-- В собранном EXE — `%LOCALAPPDATA%\Duplicater`.
+- В собранном EXE — `%LOCALAPPDATA%\TwinSweeper`.
 - Переопределяется переменной окружения `DUPLICATER_DATA_DIR` (используется тестами).
 
 ## Структура проекта

@@ -17,6 +17,10 @@ def get_data_dir() -> str:
 
     DUPLICATER_DATA_DIR overrides everything (checked first) — used by the test
     suite to keep runtime data isolated from the real user profile.
+
+    NOTE: the env var keeps its historical "DUPLICATER" name on purpose: tests
+    and CI already depend on it, and renaming it would silently break test
+    isolation for no user-facing benefit.
     """
     env_dir = os.environ.get("DUPLICATER_DATA_DIR")
     if env_dir:
@@ -25,7 +29,7 @@ def get_data_dir() -> str:
 
     if getattr(sys, "frozen", False):
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        data_dir = os.path.join(base, "Duplicater")
+        data_dir = os.path.join(base, "TwinSweeper")
         os.makedirs(data_dir, exist_ok=True)
         return data_dir
     return os.path.dirname(os.path.abspath(__file__))

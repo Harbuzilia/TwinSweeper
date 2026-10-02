@@ -1,7 +1,7 @@
 translations = {
     "en": {
         # General & Navigation
-        "app_title": "Duplicater — Pro Disk Optimizer",
+        "app_title": "TwinSweeper — Pro Disk Optimizer",
         "nav_scanner": "Duplicate Finder",
         "nav_similar_photos": "Similar Photos (pHash)",
         "nav_sweeper": "System Sweeper",
@@ -266,9 +266,9 @@ translations = {
         "context_menu_desc": "Right-click any folder in Windows Explorer to immediately scan for duplicates.",
         "add_context_menu_btn": "Add to Windows Context Menu",
         "remove_context_menu_btn": "Remove from Context Menu",
-        "context_menu_added": "Successfully added 'Scan Duplicates with Duplicater' to Windows context menu.",
-        "context_menu_removed": "Removed Duplicater from Windows context menu.",
-        "context_menu_action_title": "Scan Duplicates with Duplicater",
+        "context_menu_added": "Successfully added 'Scan Duplicates with TwinSweeper' to Windows context menu.",
+        "context_menu_removed": "Removed TwinSweeper from Windows context menu.",
+        "context_menu_action_title": "Scan Duplicates with TwinSweeper",
 
         # Core-module progress & errors (round 2 i18n)
         "scan_error": "Error: {0}",
@@ -322,7 +322,7 @@ translations = {
     },
     "ru": {
         # General & Navigation
-        "app_title": "Duplicater — Оптимизация и очистка диска",
+        "app_title": "TwinSweeper — Pro Disk Optimizer",
         "nav_scanner": "Поиск дубликатов",
         "nav_similar_photos": "Похожие фото (pHash)",
         "nav_sweeper": "Клинер мусора",
@@ -584,12 +584,12 @@ translations = {
         "cache_cleared": "База кэша успешно очищена.",
         "cache_clear_failed": "Не удалось очистить базу кэша — возможно, она занята другим процессом. Попробуйте ещё раз.",
         "context_menu_section": "Интеграция с Проводником Windows",
-        "context_menu_desc": "Позволяет кликнуть правой кнопкой мыши по любой папке в Windows и выбрать 'Найти дубликаты в Duplicater'.",
+        "context_menu_desc": "Позволяет кликнуть правой кнопкой мыши по любой папке в Windows и выбрать 'Найти дубликаты в TwinSweeper'.",
         "add_context_menu_btn": "Добавить в контекстное меню Windows",
         "remove_context_menu_btn": "Удалить из контекстного меню",
-        "context_menu_added": "Пункт 'Найти дубликаты в Duplicater' успешно добавлен в меню Проводника.",
+        "context_menu_added": "Пункт 'Найти дубликаты в TwinSweeper' успешно добавлен в меню Проводника.",
         "context_menu_removed": "Пункт успешно удален из контекстного меню Windows.",
-        "context_menu_action_title": "Найти дубликаты в Duplicater",
+        "context_menu_action_title": "Найти дубликаты в TwinSweeper",
 
         # Прогресс и ошибки модулей ядра (i18n раунда 2)
         "scan_error": "Ошибка: {0}",

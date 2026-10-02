@@ -440,7 +440,7 @@ class TestExportFormats:
         target = tmp_path / "report.txt"
         view.write_export_file(str(target), "txt")
         text = target.read_text(encoding="utf-8")
-        assert "DUPLICATER REPORT" in text
+        assert "TWINSWEEPER REPORT" in text
         assert "a0.bin" in text
 
     def test_export_failure_is_logged_not_swallowed_silently(self, tmp_path, caplog):

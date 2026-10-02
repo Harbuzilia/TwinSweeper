@@ -75,7 +75,7 @@ class TestFormatFileSize:
 class TestHashing:
     def test_get_file_hash_matches_hashlib(self, tmp_path):
         p = tmp_path / "f.bin"
-        content = b"duplicater test content" * 100
+        content = b"twinsweeper test content" * 100
         p.write_bytes(content)
         expected = hashlib.sha256(content).hexdigest()
         assert get_file_hash(str(p)) == expected
