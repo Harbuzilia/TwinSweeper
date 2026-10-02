@@ -42,17 +42,26 @@ def isolated_data_dir():
 
 
 @pytest.fixture
-def fresh_cache_db(tmp_path):
+def fresh_cache_db(tmp_path, monkeypatch):
     """A per-test ScanCacheDB instance with its own temp database.
 
-    The module-level singleton (used by scanner/phash_scanner via ``cache_db``)
-    is saved and restored afterwards so other tests are unaffected.
+    Substitutes BOTH the class singleton (``ScanCacheDB._instance``) and the
+    module-level ``cache_db`` names that ``scanner`` / ``phash_scanner`` bound
+    via ``from db_cache import cache_db`` — those names hold a reference to the
+    original singleton, so without patching them scanner code silently writes
+    into the shared cache of the isolated data dir. monkeypatch restores the
+    module names and the finally-block restores the singleton afterwards, so
+    other tests are unaffected.
     """
+    import phash_scanner
+    import scanner
     from db_cache import ScanCacheDB
 
     saved = ScanCacheDB._instance
     ScanCacheDB._instance = None
     db = ScanCacheDB(str(tmp_path / "scan_cache.db"))
+    monkeypatch.setattr(scanner, "cache_db", db)
+    monkeypatch.setattr(phash_scanner, "cache_db", db)
     try:
         yield db
     finally:
