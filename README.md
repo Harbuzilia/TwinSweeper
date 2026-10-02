@@ -15,6 +15,21 @@
 
 **[TwinSweeper.exe → Releases](https://github.com/Harbuzilia/TwinSweeper/releases/latest)** — Windows 10/11 x64, Python не нужен, ничего не устанавливается.
 
+## Скриншоты
+
+<p align="center">
+  <img src="docs/screenshots/01-search.png" width="780" alt="Поиск дубликатов" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/02-results.png" width="780" alt="Результаты: группы дубликатов" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/03-similar.png" width="780" alt="Похожие фото" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/06-settings.png" width="780" alt="Настройки" />
+</p>
+
 EXE не подписан, поэтому SmartScreen может показать «Windows защитил вас». Сверьте
 файл и запустите: «Подробнее» → «Выполнить в любом случае».
 Контрольная сумма для сверки — в Release-нотах, проверить можно так:
