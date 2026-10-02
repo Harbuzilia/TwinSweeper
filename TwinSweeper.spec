@@ -38,7 +38,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX off for public releases (owner decision, release plan item 5):
+    # compressed unsigned EXEs trigger far more antivirus false positives;
+    # revisit only if the binary gets code-signed.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
