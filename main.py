@@ -610,7 +610,8 @@ def main(page: ft.Page):
                 show_results_screen(
                     results,
                     allow_hardlink=not is_phash,
-                    content_verified=(not is_phash) and (by_hash or by_byte)
+                    content_verified=(not is_phash) and (by_hash or by_byte),
+                    is_phash=is_phash
                 )
 
         # page.run_thread keeps the flet page context in the worker — the
@@ -703,7 +704,7 @@ def main(page: ft.Page):
         page.run_thread(_worker)
 
     # View Transition Handlers
-    def show_results_screen(results: Dict[str, List[FileInfo]], allow_hardlink: bool = True, content_verified: bool = True):
+    def show_results_screen(results: Dict[str, List[FileInfo]], allow_hardlink: bool = True, content_verified: bool = True, is_phash: bool = False):
         nonlocal results_view_instance
         def on_back():
             showing_results[0] = False
@@ -721,6 +722,7 @@ def main(page: ft.Page):
             allow_hardlink=allow_hardlink,
             trash_default=trash_default[0],
             content_verified=content_verified,
+            is_phash=is_phash,
             trash_available=HAS_SEND2TRASH
         )
         showing_results[0] = True

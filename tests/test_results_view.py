@@ -14,6 +14,7 @@ import time
 import flet as ft
 import pytest
 
+from locales import translations
 from scanner import FileInfo
 from ui.results_view import ResultsView
 
@@ -203,6 +204,57 @@ class TestContentVerifiedGuard:
         verified = make_view({"k": g}, content_verified=True)
         assert unverified.unverified_banner.visible is True
         assert verified.unverified_banner.visible is False
+
+
+class TestPhashBanner:
+    """pHash (similar photos) results must NOT show the size/name-only
+    "content was NOT compared" warning — pHash DID compare visual content;
+    the groups are perceptually similar, not byte-identical. They get their
+    own honest text; size/name-only scans keep the old warning."""
+
+    @staticmethod
+    def _banner_text(view) -> str:
+        # Banner = Container(Row([Icon, Text])) — the Text is control [1].
+        return view.unverified_banner.content.controls[1].value
+
+    @staticmethod
+    def _phash_view(tmp_path, **kwargs) -> ResultsView:
+        g = [make_info(str(tmp_path / "p0.jpg"), 10),
+             make_info(str(tmp_path / "p1.jpg"), 10)]
+        # Exactly how main.py run_scan builds the view in pHash mode.
+        params = {"allow_hardlink": False, "content_verified": False,
+                  "is_phash": True}
+        params.update(kwargs)
+        return make_view({"Photo Group: 0": g}, **params)
+
+    def test_phash_banner_shows_similarity_text(self, tmp_path):
+        view = self._phash_view(tmp_path)
+        assert view.unverified_banner.visible is True
+        assert self._banner_text(view) == translations["ru"]["phash_similar_warning"]
+
+    def test_phash_banner_is_not_the_unverified_warning(self, tmp_path):
+        view = self._phash_view(tmp_path)
+        text = self._banner_text(view)
+        assert text != translations["ru"]["unverified_content_warning"]
+
+    def test_phash_banner_english_text(self, tmp_path):
+        view = self._phash_view(tmp_path, language="en")
+        assert self._banner_text(view) == translations["en"]["phash_similar_warning"]
+        assert self._banner_text(view) != translations["en"]["unverified_content_warning"]
+
+    def test_size_only_scan_keeps_old_warning(self, tmp_path):
+        g = [make_info(str(tmp_path / "a0.bin"), 10),
+             make_info(str(tmp_path / "a1.bin"), 10)]
+        view = make_view({"k": g}, content_verified=False)
+        assert view.unverified_banner.visible is True
+        assert self._banner_text(view) == translations["ru"]["unverified_content_warning"]
+
+    def test_is_phash_flag_alone_blocks_preselection(self, tmp_path):
+        """Defense-in-depth: even a contradictory construction (is_phash with
+        verified/hardlinkable flags) must never preselect similar photos —
+        the pHash banner promises 'nothing is preselected for deletion'."""
+        view = self._phash_view(tmp_path, allow_hardlink=True, content_verified=True)
+        assert view.selected_paths == set()
 
 
 class TestZeroByteNoPreselect:

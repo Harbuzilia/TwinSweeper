@@ -273,6 +273,7 @@ translations = {
         # Core-module progress & errors (round 2 i18n)
         "scan_error": "Error: {0}",
         "unverified_content_warning": "These files were grouped by SIZE/NAME only — their content was NOT compared. They may differ. Verify before deleting.",
+        "phash_similar_warning": "These photos were grouped by VISUAL similarity — they are SIMILAR, not exact duplicates. Visually alike images may differ, so nothing is preselected for deletion. Review each group before deleting.",
         "scan_candidates_found": "Found {0} candidate groups ({1} files to analyze)...",
         "scan_eta_suffix": " ({0} files/s, ETA {1}s)",
         "no_match_filters": "No files match the current filters.",
@@ -594,6 +595,7 @@ translations = {
         # Прогресс и ошибки модулей ядра (i18n раунда 2)
         "scan_error": "Ошибка: {0}",
         "unverified_content_warning": "Файлы сгруппированы ТОЛЬКО по размеру/имени — содержимое НЕ сравнивалось. Они могут различаться. Проверьте перед удалением.",
+        "phash_similar_warning": "Фото сгруппированы по ВИЗУАЛЬНОМУ сходству — это ПОХОЖИЕ, а не точные дубликаты: одинаковые на вид изображения могут различаться. Ничего не предвыделено к удалению. Проверьте группы перед удалением.",
         "scan_candidates_found": "Найдено групп-кандидатов: {0} (файлов к анализу: {1})...",
         "scan_eta_suffix": " ({0} файл/с, осталось {1} с)",
         "no_match_filters": "Под текущие фильтры не подошёл ни один файл.",
