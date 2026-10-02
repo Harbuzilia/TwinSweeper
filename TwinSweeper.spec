@@ -7,6 +7,10 @@ hiddenimports = []
 tmp_ret = collect_all('flet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Bundled runtime assets: the window icon must resolve inside _MEIPASS
+# when --onefile unpacks (see main._window_icon_path).
+datas += [('assets/icon.ico', 'assets')]
+
 
 a = Analysis(
     ['main.py'],
@@ -29,7 +33,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Duplicater',
+    name='TwinSweeper',
+    icon='assets/icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

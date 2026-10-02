@@ -419,6 +419,15 @@ def perform_move(file_entries: List[Tuple[str, int, float]], destination: str, c
                 state["errors"].extend(errs)
     return state
 
+def _window_icon_path() -> str:
+    """Path to the bundled app icon (assets/icon.ico).
+
+    In a frozen PyInstaller --onefile build bundled data is unpacked into the
+    temporary _MEIPASS dir; in dev the icon simply lives next to main.py.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "assets", "icon.ico")
+
 def main(page: ft.Page):
     # File log lives next to scan_cache.db (DUPLICATER_DATA_DIR redirects it in tests).
     setup_logging(get_data_dir())
@@ -433,6 +442,10 @@ def main(page: ft.Page):
 
     # App Window & Appearance
     page.title = get_text("app_title", current_language)
+    icon_path = _window_icon_path()
+    if os.path.exists(icon_path):
+        # .ico file; takes effect on Windows only (flet Window.icon).
+        page.window.icon = icon_path
     page.theme_mode = ft.ThemeMode.LIGHT if app_settings.get("theme") == "light_clean" else ft.ThemeMode.DARK
     page.bgcolor = BG_COLOR
     page.padding = 0
