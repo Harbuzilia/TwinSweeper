@@ -569,7 +569,7 @@ graph TD
 - [x] 2.2 robustness-миноры пачкой (a–e закрыты тестами; f — memory ceiling scanner.py — вынесен в отдельную задачу по оговорке плана)
 - [x] 3.1 fixture fresh_cache_db патчит синглтоны
 - [x] 3.2 тесты ui/search_view.py
-- [ ] 3.3 тесты ui/sample_search_view.py
+- [x] 3.3 тесты ui/sample_search_view.py
 - [x] 4.1 Duplicater.spec в git (теперь TwinSweeper.spec после ребрендинга)
 - [ ] 4.2 M4: BUILD.bat honest + spec SoT
 - [ ] 4.3 CI-матрица 3.12+3.14
