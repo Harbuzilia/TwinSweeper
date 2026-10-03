@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-10-03 — Фикс сборки: flet_desktop в PyInstaller-бандле (QA-блокер)
+
+- **Файлы:** `TwinSweeper.spec`.
+- **Что:** после `collect_all('flet')` добавлен `collect_all('flet_desktop')`
+  (datas/binaries/hiddenimports) — пакет бинарников десктоп-клиента Flet
+  теперь замораживается в EXE явно.
+- **Почему:** собранный EXE падал при запуске: `flet` — отдельный pip-пакет,
+  и при отсутствии `flet_desktop` библиотека пытается доустановить его в
+  рантайме (`ensure_flet_desktop_package_installed`); во frozen-EXE pip
+  недоступен → `ModuleNotFoundError` → краш. QA-блокер релиза: EXE не
+  запускался вовсе.
+- **Верификация:** пересборка `PyInstaller --noconfirm TwinSweeper.spec` —
+  ок; `dist\TwinSweeper.exe` вырос с 26,6 МБ до 107,5 МБ (бинарники
+  flet-клиента вошли в бандл); smoke-запуск (10 сек, `DUPLICATER_DATA_DIR` →
+  temp): процесс жив, stderr пуст, `twinsweeper.log` — «TwinSweeper 3.7.0
+  started»; pytest — 499 passed; `ruff check .` — чисто.
+
 ## 2026-10-03 — Корректный баннер для pHash-результатов (баг с uitester-скриншотов)
 
 - **Файлы:** `ui/results_view.py`, `main.py`, `locales.py`,

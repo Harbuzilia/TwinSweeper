@@ -18,6 +18,11 @@ binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# flet_desktop is a separate pip package that flet tries to pip-install at
+# runtime if missing (ensure_flet_desktop_package_installed). In a frozen EXE
+# pip install is impossible, so it must be bundled explicitly.
+tmp_ret = collect_all('flet_desktop')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 # Bundled runtime assets: the window icon must resolve inside _MEIPASS
 # when --onefile unpacks (see main._window_icon_path).
