@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-10-03 — Релиз v3.7.0
+
+Финальный релиз TwinSweeper 3.7.0. Итоги цикла:
+
+- **Correctness (M1–M6):** фильтры ФС (junction/RecycleBin/inode), кэш хэша
+  оригинала, байтовая фаза O(n); ревью approve.
+- **Тесты:** 433 → 499 passed, CI-матрица Python 3.12 + 3.14, ruff чист.
+- **Релизная инженерия:** spec в git, честный BUILD.bat, SemVer, release.yml
+  (тег → тесты → сборка → GitHub Release), clean-clone PASS.
+- **Артефакты:** MIT, иконка, version-info EXE (3.7.0.0), скриншоты, README-витрина,
+  PRIVACY.md, issue-шаблоны.
+- **QA-гейт:** пойман и исправлен критический баг сборки (flet_desktop вне бандла —
+  EXE не запускался); GUI QA по чеклисту `docs/QA_CHECKLIST.md` — без FAIL.
+- **Канал:** GitHub Releases, rc.1…rc.5 → v3.7.0.
+
 ## 2026-10-03 — Фикс сборки: flet_desktop в PyInstaller-бандле (QA-блокер)
 
 - **Файлы:** `TwinSweeper.spec`.
