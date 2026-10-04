@@ -11,6 +11,9 @@ from ui.components import (
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 class CompareView(ft.Column):
     # Folder trees run to tens of thousands of files: rendering one Control
@@ -165,12 +168,21 @@ class CompareView(ft.Column):
         self.update()
 
     async def pick_folder_a(self, e):
-        path = await self.pick_a_dialog.get_directory_path()
+        try:
+            path = await self.pick_a_dialog.get_directory_path()
+        except Exception as ex:
+            # Picker backend can raise; the tab must not crash the UI.
+            logger.warning("folder A picker failed: %s", ex)
+            return
         if path:
             self.set_folder_a(path)
 
     async def pick_folder_b(self, e):
-        path = await self.pick_b_dialog.get_directory_path()
+        try:
+            path = await self.pick_b_dialog.get_directory_path()
+        except Exception as ex:
+            logger.warning("folder B picker failed: %s", ex)
+            return
         if path:
             self.set_folder_b(path)
 

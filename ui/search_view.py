@@ -5,6 +5,9 @@ from ui.components import (
     PRIMARY_COLOR, ACCENT_COLOR, DANGER_COLOR, WARNING_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED, BORDER_COLOR, SURFACE_HOVER
 )
 from locales import get_text
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 class SearchView(ft.Column):
     def __init__(self, on_scan_start, language="ru", on_language_change=None):
@@ -373,7 +376,12 @@ class SearchView(ft.Column):
             self.exclude_field.update()
 
     async def pick_directory(self, e):
-        path = await self.pick_dir_dialog.get_directory_path()
+        try:
+            path = await self.pick_dir_dialog.get_directory_path()
+        except Exception as ex:
+            # Picker backend can raise; the tab must not crash the UI.
+            logger.warning("folder picker failed: %s", ex)
+            return
         if path and path not in self.selected_directories:
             self.selected_directories.append(path)
             self.update_folders_list()

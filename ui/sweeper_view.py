@@ -14,12 +14,15 @@ from ui.components import (
 )
 from locales import get_text
 from ops_log import log_delete_operation
+from app_logging import get_logger
 
 try:
     from send2trash import send2trash
     HAS_SEND2TRASH = True
 except ImportError:
     HAS_SEND2TRASH = False
+
+logger = get_logger(__name__)
 
 # Junk pre-selection policy (round 3): backup/dump extensions and large files
 # are often deliberate user data (DB dumps, game saves, app backups). They are
@@ -199,7 +202,12 @@ class SweeperView(ft.Column):
         ]
 
     async def pick_directory(self, e):
-        path = await self.pick_dir_dialog.get_directory_path()
+        try:
+            path = await self.pick_dir_dialog.get_directory_path()
+        except Exception as ex:
+            # Picker backend can raise; the tab must not crash the UI.
+            logger.warning("folder picker failed: %s", ex)
+            return
         if path and path not in self.selected_directories:
             self.selected_directories.append(path)
             self.update_folders_list()

@@ -12,6 +12,9 @@ from ui.components import (
     CATEGORY_ICONS
 )
 from locales import get_text
+from app_logging import get_logger
+
+logger = get_logger(__name__)
 
 class SampleSearchView(ft.Column):
     def __init__(self, on_scan_start, language="ru"):
@@ -215,7 +218,12 @@ class SampleSearchView(ft.Column):
         self.update()
 
     async def pick_folder(self, e):
-        path = await self.pick_folders_dialog.get_directory_path()
+        try:
+            path = await self.pick_folders_dialog.get_directory_path()
+        except Exception as ex:
+            # Picker backend can raise; the tab must not crash the UI.
+            logger.warning("folder picker failed: %s", ex)
+            return
         if path and path not in self.search_directories:
             self.search_directories.append(path)
             self.update_folders_list()

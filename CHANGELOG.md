@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-10-04 — Пост-релизные LOW-фиксы ревью v3.7.0 (в следующий патч)
+
+- **Файлы:** `ui/results_view.py`, `ui/sweeper_view.py`, `ui/search_view.py`,
+  `ui/compare_view.py`, `ui/sample_search_view.py`.
+- **Что:**
+  1) в диалоге сравнения «рядом» (`show_side_by_side_comparison`) оба
+  `ft.Image` получили `error_content` (`ft.Icons.BROKEN_IMAGE_ROUNDED`) по
+  образцу миниатюр — битые/недоступные картинки рендерят заглушку, а не
+  пустоту; 2) вызовы folder picker (`get_directory_path`) во всех 6 местах
+  (sweeper/search/compare A+B/sample-search/move-destination) обёрнуты в
+  `try/except Exception` с `logger.warning` через проектный
+  `app_logging.get_logger` — сбой диалога выбора папки логируется и не
+  роняет UI.
+- **Почему:** замечания код-ревью TwinSweeper v3.7.0 (severity LOW).
+- **Куда:** пост-релиз v3.7.0, пойдут в следующий патч.
+- **Верификация:** `venv\Scripts\python -m pytest tests/ -q` — 499 passed;
+  `venv\Scripts\python -m ruff check .` — чисто.
+
 ## 2026-10-03 — Релиз v3.7.0
 
 Финальный релиз TwinSweeper 3.7.0. Итоги цикла:

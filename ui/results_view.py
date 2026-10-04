@@ -965,7 +965,7 @@ class ResultsView(ft.Column):
         card_a = ft.Container(
             content=ft.Column([
                 ft.Text(get_text("photo_left_title", self.language), weight=ft.FontWeight.BOLD, color=SUCCESS_COLOR),
-                ft.Image(src=file_a.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6),
+                ft.Image(src=file_a.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6, error_content=ft.Icon(ft.Icons.BROKEN_IMAGE_ROUNDED, size=32, color=TEXT_MUTED)),
                 ft.Text(os.path.basename(file_a.path), size=12, weight=ft.FontWeight.BOLD),
                 ft.Text(f"{get_text('dimensions', self.language)}: {dims_a}", size=11, color=TEXT_MUTED),
                 ft.Text(f"{get_text('size', self.language)}: {format_file_size(file_a.size)}", size=11, color=TEXT_MUTED),
@@ -980,7 +980,7 @@ class ResultsView(ft.Column):
         card_b = ft.Container(
             content=ft.Column([
                 ft.Text(get_text("photo_right_title", self.language), weight=ft.FontWeight.BOLD, color=PRIMARY_COLOR),
-                ft.Image(src=file_b.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6),
+                ft.Image(src=file_b.path, width=320, height=240, fit=ft.BoxFit.CONTAIN, border_radius=6, error_content=ft.Icon(ft.Icons.BROKEN_IMAGE_ROUNDED, size=32, color=TEXT_MUTED)),
                 ft.Text(os.path.basename(file_b.path), size=12, weight=ft.FontWeight.BOLD),
                 ft.Text(f"{get_text('dimensions', self.language)}: {dims_b}", size=11, color=TEXT_MUTED),
                 ft.Text(f"{get_text('size', self.language)}: {format_file_size(file_b.size)}", size=11, color=TEXT_MUTED),
@@ -1236,9 +1236,14 @@ class ResultsView(ft.Column):
         if page is None:
             return
 
-        destination = await self.move_picker.get_directory_path(
-            dialog_title=get_text("choose_destination", self.language)
-        )
+        try:
+            destination = await self.move_picker.get_directory_path(
+                dialog_title=get_text("choose_destination", self.language)
+            )
+        except Exception as ex:
+            # Picker backend can raise; the move flow must not crash the UI.
+            logger.warning("destination folder picker failed: %s", ex)
+            return
         if not destination:
             return
 
