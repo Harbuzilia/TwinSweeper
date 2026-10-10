@@ -121,6 +121,10 @@ class SqliteScanIndex(ScanIndex):
             self._conn = sqlite3.connect(db_path)
             self._conn.execute("PRAGMA journal_mode=MEMORY;")
             self._conn.execute("PRAGMA synchronous=OFF;")
+            # Sorter/index-build must never touch SQLite's own temp dir: a
+            # locked-down or full %TEMP% aborts the streaming query with
+            # 'unable to open database file' (caught by the 50k benchmark).
+            self._conn.execute("PRAGMA temp_store=MEMORY;")
             self._conn.execute(
                 "CREATE TABLE idx ("
                 " size INTEGER NOT NULL,"
@@ -161,6 +165,12 @@ class SqliteScanIndex(ScanIndex):
 
     def finish(self) -> None:
         self._flush()
+        # Serves the streaming query's ORDER BY size, rowid as an index scan
+        # (index entries are rowid-ordered within each size) — no sorter and
+        # no temp files at iteration time. Built once, after the bulk load:
+        # inserting into an unindexed table first is several times faster.
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
+        self._conn.commit()
 
     def candidate_stats(self, by_size: bool = True) -> Tuple[int, int]:
         if not by_size:

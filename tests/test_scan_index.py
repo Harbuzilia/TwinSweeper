@@ -98,6 +98,30 @@ class TestIndexContract:
 
 
 class TestSqliteSpill:
+    def test_spill_needs_no_sqlite_temp_files(self, tmp_path):
+        """ORDER BY / CREATE INDEX must not spill to SQLite's own temp dir:
+        a locked-down or full %TEMP% used to abort mid-iteration with
+        'unable to open database file' (caught by the 50k benchmark).
+        temp_store=MEMORY + a size index (finish()) keep the streaming
+        query on the index order — no sorter, no temp files."""
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+        try:
+            mode = idx._conn.execute("PRAGMA temp_store").fetchone()[0]
+            assert mode == 2, "temp_store must be MEMORY"
+            for i in range(10):
+                idx.add(f"p{i}", f"p{i}", 100, float(i), float(i))
+            idx.finish()
+            names = [
+                r[0] for r in idx._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='idx'"
+                )
+            ]
+            assert names, "finish() must create the size index that serves ORDER BY size, rowid"
+            (group,) = list(idx.iter_candidate_groups(by_size=True))
+            assert len(group) == 10
+        finally:
+            idx.close()
+
     def test_batch_flush_boundary(self, monkeypatch, tmp_path):
         """Rows must survive the internal batch-flush boundary exactly."""
         monkeypatch.setattr(scan_index, "INSERT_BATCH_ROWS", 7)
