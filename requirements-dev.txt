@@ -3,3 +3,7 @@
 pytest==9.1.1
 ruff==0.16.8
 pyinstaller==6.22.2
+# e2e-гейт web-режима (tests/e2e, ручной запуск: pytest tests/e2e -m e2e).
+# Браузер ставится один раз: python -m playwright install chromium
+pytest-playwright==0.10.0
+playwright==1.63.0

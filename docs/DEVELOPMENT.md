@@ -36,11 +36,43 @@ venv\Scripts\python -m pytest tests/ -q
 venv\Scripts\python -m ruff check .
 ```
 
-Базовая линия — **494 теста, все проходят**. Ожидаемое время прогона на
+Базовая линия — **499 тестов, все проходят**. Ожидаемое время прогона на
 windows-latest: единицы секунд (реальная файловая система, без моков FS).
 
 Тот же пайплайн выполняет CI: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
 (ruff → pytest, `windows-latest`, матрица Python 3.12 + 3.14).
+
+### E2E-гейт web-режима (вручную, вне CI)
+
+`tests/e2e/` — Playwright-спек против живого Flet web-сервера
+(`FLET_FORCE_WEB_SERVER=1`, свободный порт, `DUPLICATER_DATA_DIR` → tmp):
+smoke (заголовок/сайдбар/версия), скан tmp-песочницы с авто-выбором
+дубликатов, смена языка RU→EN с сохранением результатов. Папка сканирования
+задаётся программно CLI-аргументом `main.py` — нативный folder picker в web
+не автоматизируется и не проверяется.
+
+```bat
+venv\Scripts\pip install -r requirements-dev.txt
+venv\Scripts\python -m playwright install chromium   :: один раз
+venv\Scripts\python -m pytest tests/e2e -m e2e
+```
+
+В дефолтный прогон `pytest tests/ -q` и в CI e2e не входит (маркер `e2e`
+отсеивается `addopts = -m "not e2e"` в `pytest.ini`); CLI-флаг `-m e2e`
+перекрывает addopts.
+
+Если установка браузера падает с `EPERM: operation not permitted, mkdir
+'...\ms-playwright\__dirlock'` (политика безопасности/песочница блокирует
+запись `node.exe` в системные каталоги) — перенесите каталог браузеров и
+временные файлы в разрешённое место и используйте те же переменные при
+запуске тестов:
+
+```bat
+set PLAYWRIGHT_BROWSERS_PATH=E:\AllMyProject\.pw-browsers
+set TEMP=E:\AllMyProject\.pw-temp& set TMP=E:\AllMyProject\.pw-temp
+venv\Scripts\python -m playwright install chromium
+venv\Scripts\python -m pytest tests/e2e -m e2e
+```
 
 ### Изоляция тестов от пользовательских данных
 

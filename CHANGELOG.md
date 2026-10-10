@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-10-10 — E2E-спек web-режима (пострелизный UI-гейт поверх v3.7.1)
+
+- **Файлы:** `tests/e2e/conftest.py`, `tests/e2e/test_web_e2e.py` (новые),
+  `pytest.ini` (новый), `requirements-dev.txt`, `docs/DEVELOPMENT.md`.
+- **Что:** Playwright-спек (`pytest-playwright==0.10.0`, chromium) против
+  живого Flet web-сервера (`FLET_FORCE_WEB_SERVER=1` + `FLET_SERVER_PORT` +
+  `DUPLICATER_DATA_DIR` → tmp): фикстура поднимает `main.py` subprocess'ом,
+  поллит readiness по HTTP и убивает дерево процессов после тестов. Три теста
+  (маркер `e2e`): `smoke` (заголовок TwinSweeper, сайдбар, версия из
+  `app_info`), `scan_and_select` (песочница tmp: 3 идентичных txt + 1
+  уникальный → одна группа, авто-выбор оставляет ≥1 файл невыделенным),
+  `settings_persist` (RU→EN: сайдбар переключается, результаты и выборка
+  сохраняются, язык пишется в settings.json).
+- **Почему:** пострелизный регрессионный гейт web-режима — до сих пор UI
+  проверялся только программными юнит-тестами и ручными QA-сессиями; спек
+  автоматизирует проверенные QA-сценарии rc5 (клик по `flt-semantics`,
+  semantics-placeholder).
+- **Изоляция:** папка сканирования задаётся программно существующим
+  CLI-аргументом `main.py` (нативный folder picker в web недоступен для
+  автоматизации — задокументировано в спеке); все данные — только `%TEMP%`.
+- **Прогоны:** e2e НЕ входит в дефолтный `pytest tests/` и CI (addopts
+  `-m "not e2e"` в pytest.ini); ручной запуск:
+  `venv\Scripts\python -m pytest tests/e2e -m e2e`.
+
 ## 2026-10-10 — Релиз v3.7.1
 
 Патч-релиз поверх v3.7.0. Включает пост-релизные LOW-фиксы от 2026-10-04
