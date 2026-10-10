@@ -1016,3 +1016,160 @@ class TestUnicodePaths:
 
         assert len(results) == 1
         assert len(next(iter(results.values()))) == 2
+
+
+class TestBoundedFuturesWindow:
+    """2.2f memory ceiling: the hash phase must keep only a bounded window of
+    pending futures instead of submitting every candidate at once (one Future
+    per file used to sit in RAM for the whole scan)."""
+
+    def test_window_caps_pending_submissions(self):
+        """With blocking tasks the feeder must stop at exactly `window`
+        submitted futures and resume only as results are consumed."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_items = 12
+        window = 4
+        release = threading.Event()
+        lock = threading.Lock()
+        started = []
+
+        def blocking_fn(item):
+            with lock:
+                started.append(item)
+            release.wait(timeout=10)
+            return item * 2
+
+        class CountingExecutor:
+            """Delegates to a real executor while counting submit() calls."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.submitted = 0
+
+            def submit(self, fn, *args):
+                self.submitted += 1
+                return self._inner.submit(fn, *args)
+
+            def shutdown(self, *args, **kwargs):
+                return self._inner.shutdown(*args, **kwargs)
+
+        ex = CountingExecutor(ThreadPoolExecutor(max_workers=2))
+        results = []
+
+        def consume():
+            for fut in scanner.bounded_as_completed(ex, blocking_fn, range(n_items), window):
+                results.append(fut.result())
+
+        t = threading.Thread(target=consume, daemon=True)
+        t.start()
+        try:
+            deadline = time.monotonic() + 10
+            while ex.submitted < window and time.monotonic() < deadline:
+                time.sleep(0.01)
+            # Grace period: an unbounded implementation would have submitted
+            # all 12 items by now.
+            time.sleep(0.25)
+            with lock:
+                snapshot_submitted = ex.submitted
+                snapshot_started = len(started)
+            assert snapshot_submitted == window
+            assert snapshot_started <= 2  # only max_workers can be inside fn
+
+            release.set()
+            t.join(timeout=15)
+            assert not t.is_alive(), "consumer did not finish after release"
+            assert sorted(results) == [i * 2 for i in range(n_items)]
+            assert ex.submitted == n_items
+        finally:
+            release.set()
+            ex.shutdown(wait=False, cancel_futures=True)
+
+    def test_cancel_stops_feeding(self):
+        """Once is_cancelled() flips, no further items may be submitted:
+        with 50 items and window=2 at most the primed window ever starts."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        flag = [False]
+        lock = threading.Lock()
+        started = []
+
+        def fn(item):
+            with lock:
+                started.append(item)
+                if len(started) == 1:
+                    flag[0] = True
+            return item
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            got = list(scanner.bounded_as_completed(ex, fn, range(50), 2, lambda: flag[0]))
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        with lock:
+            n_started = len(started)
+        assert len(got) <= 2
+        assert n_started <= 2, "feeder kept submitting after cancel"
+
+    def test_results_match_unbounded_map(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fn(x):
+            return x * x
+
+        items = list(range(30))
+        ex = ThreadPoolExecutor(max_workers=4)
+        try:
+            got = [f.result() for f in scanner.bounded_as_completed(ex, fn, items, 3)]
+        finally:
+            ex.shutdown(wait=True)
+        assert sorted(got) == sorted(map(fn, items))
+
+    def test_empty_items_submit_nothing(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        ex = ThreadPoolExecutor(max_workers=2)
+        try:
+            got = list(scanner.bounded_as_completed(ex, lambda x: x, [], 4))
+        finally:
+            ex.shutdown(wait=True)
+        assert got == []
+
+    def test_task_exceptions_surface_via_future(self):
+        """The helper yields futures; a failing task must surface on
+        future.result() exactly like as_completed does (caller handles it)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fn(x):
+            if x == 2:
+                raise ValueError("boom")
+            return x
+
+        ex = ThreadPoolExecutor(max_workers=2)
+        try:
+            futures = list(scanner.bounded_as_completed(ex, fn, range(4), 2))
+            ok, errors = [], 0
+            for f in futures:
+                try:
+                    ok.append(f.result())
+                except ValueError:
+                    errors += 1
+        finally:
+            ex.shutdown(wait=True)
+        assert errors == 1
+        assert sorted(ok) == [0, 1, 3]
+
+    def test_window_must_be_positive(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            with pytest.raises(ValueError):
+                list(scanner.bounded_as_completed(ex, lambda x: x, [1], 0))
+        finally:
+            ex.shutdown(wait=True)
+
+    def test_default_window_scales_with_workers(self):
+        assert scanner.default_futures_window(1) >= 64
+        assert scanner.default_futures_window(8) >= 64
+        assert scanner.default_futures_window(64) == 256

@@ -4,8 +4,8 @@ import fnmatch
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Callable, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 
 from db_cache import cache_db
 from fs_filters import (
@@ -205,6 +205,75 @@ def content_matches_bytes(expected: bytes, path: str, buffer_size: int = 65536) 
             return f.read(1) == b""
     except (OSError, PermissionError):
         return False
+
+# 2.2f memory ceiling: submitting every task at once keeps one Future object
+# (plus its dict slot) per candidate alive for the whole hashing phase — on
+# scans with hundreds of thousands of files that is hundreds of MB of pure
+# bookkeeping. The bounded window keeps at most `window` futures pending and
+# feeds new items only as earlier ones complete.
+FUTURES_WINDOW_MIN = 64
+FUTURES_WINDOW_PER_WORKER = 4
+
+_T = TypeVar("_T")
+_R = TypeVar("_R")
+
+
+def default_futures_window(max_workers: int) -> int:
+    """Default pending-futures window: enough headroom to keep every worker
+    busy (4 queued tasks per worker) without unbounded submission."""
+    return max(FUTURES_WINDOW_MIN, max_workers * FUTURES_WINDOW_PER_WORKER)
+
+
+def bounded_as_completed(
+    executor: ThreadPoolExecutor,
+    fn: Callable[[_T], _R],
+    items: Iterable[_T],
+    window: int,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+) -> Iterator[Future]:
+    """``as_completed`` with a bounded submission window (2.2f).
+
+    Submits at most ``window`` tasks ahead of the consumer and refills only as
+    futures complete, so peak memory is O(window) futures instead of O(len(items)).
+    ``is_cancelled`` is checked BEFORE every submission and after every drained
+    completion set: once it flips, no further items are fed and the generator
+    returns, leaving any still-pending futures to the caller's
+    ``executor.shutdown(wait=False, cancel_futures=True)`` — the established
+    cancel contract of the scan phases.
+
+    Yields futures in completion order; exceptions surface on ``future.result()``
+    exactly as with ``as_completed``.
+    """
+    if window < 1:
+        raise ValueError("window must be >= 1")
+    cancelled = is_cancelled if is_cancelled is not None else (lambda: False)
+    it = iter(items)
+    pending: set = set()
+    exhausted = False
+
+    def _feed() -> bool:
+        """Top the window up from the items iterator. Returns True when the
+        cancel flag stopped the feeding (exhaustion sets `exhausted`)."""
+        nonlocal exhausted
+        while not exhausted and len(pending) < window:
+            if cancelled():
+                return True
+            try:
+                item = next(it)
+            except StopIteration:
+                exhausted = True
+                break
+            pending.add(executor.submit(fn, item))
+        return False
+
+    stopped = _feed()
+    while pending and not stopped:
+        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for future in done:
+            yield future
+        if cancelled():
+            break
+        stopped = _feed()
 
 def scan_directory(
     directories: List[str],
