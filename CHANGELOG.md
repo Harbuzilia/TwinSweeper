@@ -5,6 +5,46 @@
 
 ---
 
+## 2026-10-10 — 2.2f Пострелизный техдолг: memory ceiling сканирования
+
+- **Файлы:** `scanner.py`, `phash_scanner.py`, `scan_index.py` (новый),
+  `tests/test_scanner.py`, `tests/test_phash_scanner.py`,
+  `tests/test_scan_index.py` (новый).
+- **Что:**
+  1) **Bounded futures window**: фазы хэширования (`scan_directory`) и
+  pHash (`scan_similar_images`) больше не сабмитят все задачи разом —
+  `bounded_as_completed` держит не более `max(64, workers*4)` ожидающих
+  futures и подаёт следующие по мере завершения; cancel-флаг проверяется
+  ПЕРЕД каждой подачей. Опциональный kwarg `futures_window` (обратно
+  совместим, main.py не менялся).
+  2) **Spill-to-disk discovery**: `scan_directory` не материализует
+  `FileInfo` для каждого найденного файла — строки
+  `(path, name, size, ctime, mtime)` батчами (5000) уходят во временную
+  SQLite-базу (`SqliteScanIndex`: journal/temp_store в MEMORY, индекс по
+  size строится в `finish()`), обратно лениво стримятся только
+  duplicate-size-группы в порядке обнаружения (`ORDER BY size, rowid`) и
+  хэшируются батчами `CANDIDATE_BATCH_FILES=4096` без разрыва
+  size-группы — группировка побатчево идентична глобальной, т.к. ключ
+  содержит size. При недоступности SQLite — фолбэк `MemoryScanIndex`
+  (tuple-строки, ~4x легче FileInfo). Индекс закрывается в
+  `try/finally` на любом выходе (успех/cancel/исключение).
+- **Почему:** на сканах в сотни тысяч файлов все FileInfo + все futures
+  жили в RAM одновременно (пик сотни МБ). Замер tracemalloc (синтетика,
+  Python 3.14): 50k файлов-кандидатов — пик **131.2 → 12.1 МБ (÷10.8)**;
+  10k файлов с уникальными размерами — **7.1 → 3.8 МБ**. Семантика
+  результатов не изменилась: группы, сортировка «oldest first», cancel,
+  прогресс/ETA, кэш хэшей — покрыто 42 новыми тестами.
+- **Trade-offs:** на синтетике из 50k МЕЛКИХ файлов время +54%
+  (5.4 → 8.3 с без tracemalloc) — стоимость spill/индекса; на реальных
+  сканах амортизируется I/O хэширования. `by_size=False` (редкий режим)
+  сохраняет плоскую материализацию кандидатов — ключи группировки там
+  пересекают размеры. Остаточная материализация: `InodeDeduper`
+  (~(dev,ino) на файл) — кандидат на будущую упаковку.
+- **Верификация:** `venv\Scripts\python -m pytest -q` — 541 passed
+  (499 + 42); `venv\Scripts\python -m ruff check .` — чисто. По пути
+  пойман и исправлен баг спилла: `ORDER BY` на 50k строк требовал
+  temp-файл SQLite («unable to open database file» на закрытом %TEMP%).
+
 ## 2026-10-10 — Релиз v3.7.1
 
 Патч-релиз поверх v3.7.0. Включает пост-релизные LOW-фиксы от 2026-10-04
