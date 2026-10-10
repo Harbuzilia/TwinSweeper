@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from db_cache import cache_db
 from fs_filters import (
@@ -15,6 +15,7 @@ from fs_filters import (
     prune_dirs,
 )
 from locales import get_text
+from scan_index import open_scan_index
 
 try:
     import xxhash
@@ -214,6 +215,11 @@ def content_matches_bytes(expected: bytes, path: str, buffer_size: int = 65536) 
 FUTURES_WINDOW_MIN = 64
 FUTURES_WINDOW_PER_WORKER = 4
 
+# Candidate rows are pulled from the discovery index and hashed in batches:
+# a batch bounds how many FileInfo objects coexist during the hashing phase,
+# while staying far above the worker count so the pool never starves (2.2f).
+CANDIDATE_BATCH_FILES = 4096
+
 _T = TypeVar("_T")
 _R = TypeVar("_R")
 
@@ -289,10 +295,15 @@ def scan_directory(
     max_size_bytes: Optional[int] = None,
     ignore_empty_files: bool = True,
     use_cache: bool = True,
-    max_workers: int = 8
+    max_workers: int = 8,
+    futures_window: Optional[int] = None
 ) -> Dict[str, List[FileInfo]]:
     """
     High-performance multi-threaded duplicate scanner with SQLite persistent cache.
+
+    ``futures_window`` (2.2f): cap on simultaneously pending hashing futures;
+    None uses ``default_futures_window(max_workers)``. Lower values trade a
+    little scheduling overhead for lower peak RAM.
     """
     # All criteria off means "match nothing" — without this guard the scan
     # returned EVERY indexed file as one duplicate group, pre-selected for
@@ -331,7 +342,6 @@ def scan_directory(
                 return True
         return False
 
-    files_by_size = defaultdict(list)
     total_found = 0
     # One physical file must never appear twice in the results. Hardlinks,
     # junction/symlink aliases and overlapping scan roots (C:\ together with
@@ -339,94 +349,84 @@ def scan_directory(
     # as "duplicates" would let the user delete a file and thereby destroy the
     # very "original" it pointed at (round 3).
     inode_dedup = InodeDeduper()
+    # 2.2f memory ceiling: discovery rows spill to a throwaway SQLite index
+    # instead of a FileInfo per walked file — unique-size files (the bulk of
+    # a typical tree) never become objects, and candidate groups stream back
+    # lazily in discovery order.
+    index = open_scan_index()
 
-    # Phase 1: File discovery & size indexing
-    report_progress(get_text("scan_phase_indexing"), 0.0)
-    for directory in directories:
-        if is_cancelled():
-            return {}
-        if not os.path.exists(directory):
-            continue
-
-        for root, dirs, filenames in os.walk(directory, topdown=True, followlinks=False):
+    try:
+        # Phase 1: File discovery & size indexing
+        report_progress(get_text("scan_phase_indexing"), 0.0)
+        for directory in directories:
             if is_cancelled():
                 return {}
-            # System locations and junctions are pruned from every walk —
-            # the shared rules live in fs_filters (M2/M3).
-            prune_dirs(root, dirs)
-            if exclude_patterns:
-                dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
+            if not os.path.exists(directory):
+                continue
 
-            for filename in filenames:
-                filepath = os.path.join(root, filename)
-                if should_exclude(filepath):
-                    continue
+            for root, dirs, filenames in os.walk(directory, topdown=True, followlinks=False):
+                if is_cancelled():
+                    return {}
+                # System locations and junctions are pruned from every walk —
+                # the shared rules live in fs_filters (M2/M3).
+                prune_dirs(root, dirs)
+                if exclude_patterns:
+                    dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
 
-                try:
-                    stat = os.stat(filepath)
-                    file_size = stat.st_size
-
-                    if ignore_empty_files and file_size == 0:
-                        continue
-                    if file_size < min_size_bytes:
-                        continue
-                    if max_size_bytes is not None and file_size > max_size_bytes:
+                for filename in filenames:
+                    filepath = os.path.join(root, filename)
+                    if should_exclude(filepath):
                         continue
 
-                    # Skip a file we already indexed under another path
-                    # (hardlink / junction alias / overlapping root).
-                    if inode_dedup.already_seen(stat):
+                    try:
+                        stat = os.stat(filepath)
+                        file_size = stat.st_size
+
+                        if ignore_empty_files and file_size == 0:
+                            continue
+                        if file_size < min_size_bytes:
+                            continue
+                        if max_size_bytes is not None and file_size > max_size_bytes:
+                            continue
+
+                        # Skip a file we already indexed under another path
+                        # (hardlink / junction alias / overlapping root).
+                        if inode_dedup.already_seen(stat):
+                            continue
+
+                        index.add(filepath, filename, file_size, stat.st_ctime, stat.st_mtime)
+                        total_found += 1
+
+                        if total_found % 200 == 0:
+                            report_progress(get_text("scan_indexed").format(total_found), None)
+                    except (OSError, PermissionError):
                         continue
 
-                    info = FileInfo(
-                        path=filepath,
-                        name=filename,
-                        size=file_size,
-                        created=stat.st_ctime,
-                        modified=stat.st_mtime
-                    )
-                    files_by_size[file_size].append(info)
-                    total_found += 1
+        if is_cancelled():
+            return {}
+        index.finish()
 
-                    if total_found % 200 == 0:
-                        report_progress(get_text("scan_indexed").format(total_found), None)
-                except (OSError, PermissionError):
-                    continue
+        # Unique sizes never leave the index: only duplicate-size groups (or,
+        # with by_size off, the single combined pool) stream back out.
+        num_groups, total_candidates = index.candidate_stats(by_size)
+        if total_candidates == 0:
+            return {}
 
-    if is_cancelled():
-        return {}
+        # Quick win: the user sees the scan's scale BEFORE the expensive
+        # hashing phase starts.
+        report_progress(get_text("scan_candidates_found").format(num_groups, total_candidates), 0.05)
 
-    # Filter out unique sizes
-    candidate_groups = []
-    if by_size:
-        candidate_groups = [files for size, files in files_by_size.items() if len(files) > 1]
-    else:
-        all_candidates = []
-        for flist in files_by_size.values():
-            all_candidates.extend(flist)
-        if len(all_candidates) > 1:
-            candidate_groups = [all_candidates]
+        if not by_hash and not by_name and not by_byte:
+            return {
+                str(rows[0][2]): [FileInfo(path=p, name=n, size=s, created=c, modified=m) for p, n, s, c, m in rows]
+                for rows in index.iter_candidate_groups(by_size)
+            }
 
-    total_candidates = sum(len(g) for g in candidate_groups)
-    if total_candidates == 0:
-        return {}
-
-    # Quick win: the user sees the scan's scale BEFORE the expensive
-    # hashing phase starts.
-    report_progress(get_text("scan_candidates_found").format(len(candidate_groups), total_candidates), 0.05)
-
-    if not by_hash and not by_name and not by_byte:
-        return {str(g[0].size): g for g in candidate_groups}
-
-    files_to_hash = []
-    for g in candidate_groups:
-        files_to_hash.extend(g)
-
-    if by_hash:
-        # Phase 2: Parallel hashing with SQLite Cache.
-        # Skipped entirely for size/name-only scans — hashing every candidate there
-        # is pure wasted I/O.
-        report_progress(get_text("scan_phase_analyzing").format(total_candidates), 0.1)
+        if by_hash:
+            # Phase 2: Parallel hashing with SQLite Cache.
+            # Skipped entirely for size/name-only scans — hashing every candidate there
+            # is pure wasted I/O.
+            report_progress(get_text("scan_phase_analyzing").format(total_candidates), 0.1)
 
         processed_count = 0
 
@@ -452,151 +452,193 @@ def scan_directory(
                     cache_db.save_file_hash(info.path, info.size, info.modified, full_hash=h)
             return info, h
 
-        # No `with` block: its __exit__ calls shutdown(wait=True) which JOINS
-        # in-flight tasks — a cancelled scan would block for as long as the
-        # currently-hashing files take (minutes for big files). On cancel we
-        # return immediately; queued futures are dropped, running ones finish
-        # in their own threads without holding the scan hostage.
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        futures = {executor.submit(compute_hash_for_file, info): info for info in files_to_hash}
+        duplicates: Dict[str, List[FileInfo]] = {}
         cancelled = False
+        executor: Optional[ThreadPoolExecutor] = None
         hash_started = time.monotonic()
-        for future in as_completed(futures):
+        window = futures_window if futures_window is not None else default_futures_window(max_workers)
+
+        def hash_batch(batch: List[FileInfo]) -> bool:
+            """Hash one batch through the bounded futures window (2.2f: at
+            most `window` futures pending instead of one per candidate).
+            Returns True when the scan was cancelled mid-phase."""
+            nonlocal processed_count, executor
+            if executor is None:
+                # No `with` block: its __exit__ calls shutdown(wait=True) which JOINS
+                # in-flight tasks — a cancelled scan would block for as long as the
+                # currently-hashing files take (minutes for big files). On cancel we
+                # return immediately; queued futures are dropped, running ones finish
+                # in their own threads without holding the scan hostage.
+                executor = ThreadPoolExecutor(max_workers=max_workers)
+            for future in bounded_as_completed(executor, compute_hash_for_file, batch, min(window, len(batch)), is_cancelled):
+                if is_cancelled():
+                    return True
+                try:
+                    info, h = future.result()
+                    if h is not None:
+                        info.hash = h
+                except Exception:
+                    pass
+
+                processed_count += 1
+                if processed_count % 50 == 0 or processed_count == total_candidates:
+                    pct = 0.1 + (processed_count / total_candidates) * 0.7
+                    msg = get_text("scan_hashed").format(processed_count, total_candidates)
+                    elapsed = time.monotonic() - hash_started
+                    if elapsed >= 1.0 and processed_count > 0:
+                        # Quick win: live speed + ETA instead of a bare counter.
+                        speed = processed_count / elapsed
+                        eta = (total_candidates - processed_count) / speed
+                        msg += get_text("scan_eta_suffix").format(int(speed), int(eta))
+                    report_progress(msg, pct)
+            return False
+
+        def group_batch(batch: List[FileInfo]) -> None:
+            """Group one batch by key. With by_size the key contains the size
+            and a size group is never split across batches, so per-batch
+            grouping is identical to the old whole-list grouping."""
+            grouped = defaultdict(list)
+            for info in batch:
+                if by_hash and info.hash is None:
+                    continue
+
+                key_parts = []
+                if by_size:
+                    key_parts.append(str(info.size))
+                if by_name:
+                    key_parts.append(info.name.lower())
+                if by_hash:
+                    key_parts.append(info.hash)
+
+                key = "|".join(key_parts)
+                grouped[key].append(info)
+
+            for key, files in grouped.items():
+                if len(files) > 1:
+                    duplicates[key] = files
+
+        # Stream the candidate groups and hash them in bounded batches: peak
+        # RAM stays O(batch + window) FileInfo objects instead of O(all
+        # candidates) + one Future each (2.2f).
+        batch: List[FileInfo] = []
+        for rows in index.iter_candidate_groups(by_size):
             if is_cancelled():
                 cancelled = True
                 break
-            try:
-                info, h = future.result()
-                if h is not None:
-                    info.hash = h
-            except Exception:
-                pass
+            batch.extend(FileInfo(path=p, name=n, size=s, created=c, modified=m) for p, n, s, c, m in rows)
+            if len(batch) >= CANDIDATE_BATCH_FILES:
+                if by_hash:
+                    cancelled = hash_batch(batch)
+                    if cancelled:
+                        break
+                group_batch(batch)
+                batch = []
+        if not cancelled and batch:
+            if by_hash:
+                cancelled = hash_batch(batch)
+            if not cancelled:
+                group_batch(batch)
 
-            processed_count += 1
-            if processed_count % 50 == 0 or processed_count == total_candidates:
-                pct = 0.1 + (processed_count / total_candidates) * 0.7
-                msg = get_text("scan_hashed").format(processed_count, total_candidates)
-                elapsed = time.monotonic() - hash_started
-                if elapsed >= 1.0 and processed_count > 0:
-                    # Quick win: live speed + ETA instead of a bare counter.
-                    speed = processed_count / elapsed
-                    eta = (total_candidates - processed_count) / speed
-                    msg += get_text("scan_eta_suffix").format(int(speed), int(eta))
-                report_progress(msg, pct)
-
-        if cancelled:
-            executor.shutdown(wait=False, cancel_futures=True)
+        if cancelled or is_cancelled():
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
             return {}
-        executor.shutdown(wait=True)
+        if executor is not None:
+            executor.shutdown(wait=True)
 
-    # Group by Key
-    grouped = defaultdict(list)
-    for info in files_to_hash:
-        if by_hash and info.hash is None:
-            continue
+        # Turbo verification with full SHA-256 for collision elimination
+        if turbo_mode and by_hash and duplicates:
+            report_progress(get_text("scan_verifying_full"), 0.85)
+            verified_grouped = defaultdict(list)
 
-        key_parts = []
-        if by_size:
-            key_parts.append(str(info.size))
-        if by_name:
-            key_parts.append(info.name.lower())
-        if by_hash:
-            key_parts.append(info.hash)
-
-        key = "|".join(key_parts)
-        grouped[key].append(info)
-
-    duplicates = {k: v for k, v in grouped.items() if len(v) > 1}
-
-    # Turbo verification with full SHA-256 for collision elimination
-    if turbo_mode and by_hash and duplicates:
-        report_progress(get_text("scan_verifying_full"), 0.85)
-        verified_grouped = defaultdict(list)
-
-        for key, files in duplicates.items():
-            if is_cancelled():
-                return {}
-            for info in files:
-                full_h = cache_db.get_file_hash(info.path, info.size, info.modified, turbo=False) if use_cache else None
-                if not full_h:
-                    full_h = get_file_hash(info.path)
-                    if full_h and use_cache:
-                        cache_db.save_file_hash(info.path, info.size, info.modified, full_hash=full_h)
-
-                if full_h is not None:
-                    info.hash = full_h
-                    v_key = f"{info.size}|{full_h}"
-                    if by_name:
-                        v_key = f"{info.name.lower()}|" + v_key
-                    verified_grouped[v_key].append(info)
-
-        duplicates = {k: v for k, v in verified_grouped.items() if len(v) > 1}
-
-    # Phase 3: Byte-by-byte verification — byte-only mode (M6).
-    # With by_hash on, every group reaching this point is already proven by
-    # a FULL SHA-256: full mode hashes with SHA-256 directly, and the turbo
-    # verification block above has replaced every partial hash with a full
-    # one. Re-checking those groups byte-by-byte would repeat the same proof
-    # at ~n times the I/O. A SHA-256 collision between same-sized files is
-    # outside this project's risk model (README: full SHA-256 IS the
-    # duplicate-proof standard), so the byte pass runs only when the user
-    # asked for content proof WITHOUT hashing.
-    if by_byte and duplicates and not by_hash:
-        report_progress(get_text("scan_phase_byte"), 0.9)
-        final_duplicates = {}
-        total_groups = len(duplicates)
-
-        for g_idx, (key, files) in enumerate(duplicates.items(), 1):
-            if is_cancelled():
-                return {}
-
-            remaining = deque(files)
-            sub_idx = 0
-            while remaining:
-                # Cancel must be honored INSIDE the subgroup loop too — a
-                # single huge group used to keep comparing (and reading)
-                # long after the user pressed Cancel (stage-1 review).
+            for key, files in duplicates.items():
                 if is_cancelled():
                     return {}
-                current = remaining.popleft()
-                # M6: the reference is read once per subgroup and served
-                # from RAM to every candidate (see load_byte_reference for
-                # the oversized fallback).
-                ref_content = load_byte_reference(current.path, current.size)
-                matched = [current]
-                unmatched = deque()
-                for other in remaining:
-                    # Equal content implies equal size — skip the I/O for
-                    # size-mismatched candidates outright.
-                    if other.size != current.size:
-                        unmatched.append(other)
-                        continue
-                    if ref_content is not None:
-                        is_same = content_matches_bytes(ref_content, other.path)
-                    else:
-                        is_same = compare_byte_by_byte(current.path, other.path)
-                    if is_same:
-                        matched.append(other)
-                    else:
-                        unmatched.append(other)
+                for info in files:
+                    full_h = cache_db.get_file_hash(info.path, info.size, info.modified, turbo=False) if use_cache else None
+                    if not full_h:
+                        full_h = get_file_hash(info.path)
+                        if full_h and use_cache:
+                            cache_db.save_file_hash(info.path, info.size, info.modified, full_hash=full_h)
 
-                if len(matched) > 1:
-                    final_duplicates[f"{key}_b{sub_idx}"] = matched
-                    sub_idx += 1
-                remaining = unmatched
+                    if full_h is not None:
+                        info.hash = full_h
+                        v_key = f"{info.size}|{full_h}"
+                        if by_name:
+                            v_key = f"{info.name.lower()}|" + v_key
+                        verified_grouped[v_key].append(info)
 
-            report_progress(get_text("scan_byte_progress").format(g_idx, total_groups), 0.9 + (g_idx / total_groups) * 0.1)
+            duplicates = {k: v for k, v in verified_grouped.items() if len(v) > 1}
 
-        duplicates = final_duplicates
+        # Phase 3: Byte-by-byte verification — byte-only mode (M6).
+        # With by_hash on, every group reaching this point is already proven by
+        # a FULL SHA-256: full mode hashes with SHA-256 directly, and the turbo
+        # verification block above has replaced every partial hash with a full
+        # one. Re-checking those groups byte-by-byte would repeat the same proof
+        # at ~n times the I/O. A SHA-256 collision between same-sized files is
+        # outside this project's risk model (README: full SHA-256 IS the
+        # duplicate-proof standard), so the byte pass runs only when the user
+        # asked for content proof WITHOUT hashing.
+        if by_byte and duplicates and not by_hash:
+            report_progress(get_text("scan_phase_byte"), 0.9)
+            final_duplicates = {}
+            total_groups = len(duplicates)
 
-    # Deterministic order inside every group: oldest file first.
-    # The UI labels group[0] as "Original / Keep", so random arrival order
-    # from the thread pool must not leak into the results.
-    for files in duplicates.values():
-        files.sort(key=lambda f: f.modified)
+            for g_idx, (key, files) in enumerate(duplicates.items(), 1):
+                if is_cancelled():
+                    return {}
 
-    report_progress(get_text("scan_complete"), 1.0)
-    return duplicates
+                remaining = deque(files)
+                sub_idx = 0
+                while remaining:
+                    # Cancel must be honored INSIDE the subgroup loop too — a
+                    # single huge group used to keep comparing (and reading)
+                    # long after the user pressed Cancel (stage-1 review).
+                    if is_cancelled():
+                        return {}
+                    current = remaining.popleft()
+                    # M6: the reference is read once per subgroup and served
+                    # from RAM to every candidate (see load_byte_reference for
+                    # the oversized fallback).
+                    ref_content = load_byte_reference(current.path, current.size)
+                    matched = [current]
+                    unmatched = deque()
+                    for other in remaining:
+                        # Equal content implies equal size — skip the I/O for
+                        # size-mismatched candidates outright.
+                        if other.size != current.size:
+                            unmatched.append(other)
+                            continue
+                        if ref_content is not None:
+                            is_same = content_matches_bytes(ref_content, other.path)
+                        else:
+                            is_same = compare_byte_by_byte(current.path, other.path)
+                        if is_same:
+                            matched.append(other)
+                        else:
+                            unmatched.append(other)
+
+                    if len(matched) > 1:
+                        final_duplicates[f"{key}_b{sub_idx}"] = matched
+                        sub_idx += 1
+                    remaining = unmatched
+
+                report_progress(get_text("scan_byte_progress").format(g_idx, total_groups), 0.9 + (g_idx / total_groups) * 0.1)
+
+            duplicates = final_duplicates
+
+        # Deterministic order inside every group: oldest file first.
+        # The UI labels group[0] as "Original / Keep", so random arrival order
+        # from the thread pool must not leak into the results.
+        for files in duplicates.values():
+            files.sort(key=lambda f: f.modified)
+
+        report_progress(get_text("scan_complete"), 1.0)
+        return duplicates
+    finally:
+        # 2.2f: the spill DB is scan-scoped state — released on every exit
+        # path (success, cancel, exception) instead of waiting for GC.
+        index.close()
 
 def scan_for_sample(
     sample_path: str,

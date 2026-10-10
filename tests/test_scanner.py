@@ -1173,3 +1173,130 @@ class TestBoundedFuturesWindow:
         assert scanner.default_futures_window(1) >= 64
         assert scanner.default_futures_window(8) >= 64
         assert scanner.default_futures_window(64) == 256
+
+
+class TestMemoryCeiling:
+    """2.2f: peak RAM of a scan must stay bounded — unique-size files never
+    become FileInfo objects, hashing runs in bounded batches/windows, and the
+    spill index is closed on every exit path. Result semantics must not move."""
+
+    @staticmethod
+    def _mixed_tree(tmp_path):
+        """3x identical 1000B + 2x identical 512B + 2x same-size(777B) but
+        DIFFERENT content (candidates that must not group) + uniques."""
+        for i in range(3):
+            d = tmp_path / f"big{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"A" * 1000)
+        for i in range(2):
+            d = tmp_path / f"mid{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"B" * 512)
+        (tmp_path / "x1").mkdir()
+        (tmp_path / "x2").mkdir()
+        (tmp_path / "x1" / "diff.bin").write_bytes(b"C" * 777)
+        (tmp_path / "x2" / "diff.bin").write_bytes(b"D" * 777)
+        (tmp_path / "lonely.bin").write_bytes(b"U" * 333)
+
+    def test_results_identical_with_tiny_window_and_batches(self, tmp_path, monkeypatch):
+        self._mixed_tree(tmp_path)
+        baseline = scan_directory([str(tmp_path)], by_hash=True, use_cache=False)
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        small = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+        assert small == baseline
+        assert len(baseline) == 2
+        assert sorted(len(g) for g in baseline.values()) == [2, 3]
+
+    def test_size_group_never_split_across_batches(self, tmp_path, monkeypatch):
+        """3 copies of A + 2 copies of B, all the SAME size: one size group
+        of 5. A batch size of 2 must not split it, or same-content members
+        land in different batches and the groups shatter."""
+        for i in range(3):
+            d = tmp_path / f"a{i}"
+            d.mkdir()
+            (d / "f.bin").write_bytes(b"A" * 70)
+        for i in range(2):
+            d = tmp_path / f"b{i}"
+            d.mkdir()
+            (d / "f.bin").write_bytes(b"B" * 70)
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+        assert len(results) == 2
+        assert sorted(len(g) for g in results.values()) == [2, 3]
+
+    def test_unique_size_files_never_materialized_as_fileinfo(self, dup_tree, monkeypatch):
+        created = []
+
+        class RecordingFileInfo(scanner.FileInfo):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self.path)
+
+        monkeypatch.setattr(scanner, "FileInfo", RecordingFileInfo)
+        scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        # a.txt / other.log have unique sizes — with the spill index they are
+        # rows on disk and never become FileInfo objects.
+        assert created == [p for p in created if p.endswith("dup.bin")]
+        assert len(created) == 3
+
+    def test_index_closed_on_success_and_on_cancel(self, dup_tree, monkeypatch):
+        import scan_index as scan_index_module
+
+        created = []
+        real_open = scan_index_module.open_scan_index
+
+        def capturing_open():
+            idx = real_open()
+            created.append(idx)
+            return idx
+
+        monkeypatch.setattr(scanner, "open_scan_index", capturing_open)
+
+        scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        assert created and created[-1].closed
+
+        flag = [False]
+
+        def cancelling_hash(path):
+            flag[0] = True
+            return "deadbeef"
+
+        monkeypatch.setattr(scanner, "get_file_hash", cancelling_hash)
+        results = scan_directory([str(dup_tree)], by_hash=True, turbo_mode=False, use_cache=False, cancel_flag=flag, max_workers=1)
+        assert results == {}
+        assert created[-1].closed
+
+    def test_progress_counters_preserved_with_small_window(self, tmp_path, monkeypatch):
+        from locales import get_text
+
+        for i in range(5):
+            for j in range(2):
+                d = tmp_path / f"p{i}_{j}"
+                d.mkdir()
+                (d / "f.bin").write_bytes(bytes([65 + i]) * (100 + i))
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        messages = []
+        scan_directory(
+            [str(tmp_path)], by_hash=True, use_cache=False, futures_window=1,
+            progress_callback=lambda m, p: messages.append((m, p)),
+        )
+        msgs = [m for m, _ in messages]
+        pcts = [p for _, p in messages if p is not None]
+        # The hashed counter must still reach the full candidate total across
+        # batches (ETA/progress contract), and the scan must end at 100%.
+        assert any(m.startswith(get_text("scan_hashed").format(10, 10)) for m in msgs)
+        assert pcts[-1] == 1.0
+        assert pcts == sorted(pcts)
+
+    def test_fallback_to_memory_index_scans_correctly(self, dup_tree, monkeypatch):
+        import sqlite3
+
+        import scan_index as scan_index_module
+
+        def boom(*args, **kwargs):
+            raise sqlite3.OperationalError("spill unavailable")
+
+        monkeypatch.setattr(scan_index_module.sqlite3, "connect", boom)
+        results = scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        assert len(results) == 1
+        assert len(next(iter(results.values()))) == 3
