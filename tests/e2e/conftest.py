@@ -12,6 +12,11 @@
 Готовность определяется поллингом ``http://127.0.0.1:<port>/`` до HTTP 200;
 после тестов процесс убивается вместе с деревом (``taskkill /T`` на Windows).
 
+Браузер — системный Chrome (``launch(channel="chrome")``) с fallback на
+bundled chromium Playwright: если ``playwright install`` не прошёл
+(CDN/зеркало недоступны, chromium-1243 не скачался), гейт всё равно
+запускается на системном браузере.
+
 ВАЖНО про выбор папки сканирования: нативный folder picker
 (``FilePicker.get_directory_path``) в web-режиме открывает системный диалог
 браузера, который Playwright автоматизировать не может, — он в e2e НЕ
@@ -31,9 +36,11 @@ import sys
 import tempfile
 import time
 import urllib.request
+from collections.abc import Callable, Generator
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Browser, Error as PlaywrightError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,6 +87,32 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 def browser_context_args(browser_context_args):
     """Десктопный viewport: сайдбар 236px + контент должны влезать без скролла."""
     return {**browser_context_args, "viewport": {"width": 1600, "height": 900}}
+
+
+@pytest.fixture(scope="session")
+def browser(
+    launch_browser: Callable[..., Browser],
+    browser_type_launch_args: dict,
+) -> Generator[Browser, None, None]:
+    """Системный Chrome (``channel="chrome"``) с fallback на bundled chromium.
+
+    Перекрывает одноимённую фикстуру pytest-playwright: бандл-браузер
+    ставится отдельно (``playwright install``) и на этой машине не скачался
+    (chromium-1243: CDN и зеркало прерваны), поэтому первым делом пробуем
+    системный Chrome, при ошибке запуска — обычный ``launch()`` (bundled).
+    Явный ``--browser-channel`` из CLI приоритетнее и не переопределяется.
+    """
+    if browser_type_launch_args.get("channel"):
+        # Канал задан явно (CLI --browser-channel) — не вмешиваемся.
+        browser = launch_browser()
+    else:
+        try:
+            browser = launch_browser(channel="chrome")
+        except PlaywrightError as exc:
+            print(f"[e2e] launch(channel='chrome') не удался, fallback на bundled chromium: {exc}")
+            browser = launch_browser()
+    yield browser
+    browser.close()
 
 
 @pytest.fixture(scope="module")
