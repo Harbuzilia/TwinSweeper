@@ -697,6 +697,79 @@ class TestScanForSample:
         # Sample itself + the two size-matching candidates — nothing else.
         assert len(calls) == 3
 
+    def test_hash_and_byte_skips_byte_pass_m6(self, tmp_path, monkeypatch):
+        """M6 parity with scan_directory: with by_hash on, a full SHA-256
+        already proves content equality — the byte pass must not re-prove
+        it (double proof at ~n times the I/O). The saboteur comparators must
+        never be consulted and the copies are still found."""
+        sample, dst = self._sample_tree(tmp_path)
+        byte_calls = []
+        monkeypatch.setattr(
+            scanner, "compare_byte_by_byte",
+            lambda *a, **k: byte_calls.append(a) or False,
+        )
+        monkeypatch.setattr(
+            scanner, "content_matches_bytes",
+            lambda *a, **k: byte_calls.append(a) or False,
+        )
+
+        found = scan_for_sample(str(sample), [str(dst)], by_byte=True)
+
+        assert {f.path for f in found} == {str(dst / "copy.bin"), str(dst / "sample.bin")}
+        assert byte_calls == []
+
+    def test_byte_only_reads_sample_once_into_ram_m6(self, tmp_path, monkeypatch):
+        """M6 parity for the sample search: byte-only verification anchors
+        on the sample's content loaded ONCE into RAM (load_byte_reference)
+        and compares every candidate against it — compare_byte_by_byte
+        re-reads the sample from disk per candidate and must not be used
+        for a cacheable reference."""
+        sample, dst = self._sample_tree(tmp_path)
+        pairwise_calls = []
+        real_pairwise = scanner.compare_byte_by_byte
+
+        def counting_pairwise(f1, f2, *a, **k):
+            pairwise_calls.append((f1, f2))
+            return real_pairwise(f1, f2, *a, **k)
+
+        monkeypatch.setattr(scanner, "compare_byte_by_byte", counting_pairwise)
+
+        found = scan_for_sample(str(sample), [str(dst)], by_hash=False, by_byte=True)
+
+        assert {f.path for f in found} == {str(dst / "copy.bin"), str(dst / "sample.bin")}
+        assert pairwise_calls == []
+
+    def test_byte_only_oversized_sample_falls_back_to_streaming(self, tmp_path, monkeypatch):
+        """An oversized sample (over BYTE_REFERENCE_CACHE_LIMIT) must not sit
+        wholly in RAM: verification falls back to pairwise streaming — the
+        M6 reference-cache contract, mirrored from scan_directory."""
+        sample, dst = self._sample_tree(tmp_path)
+        monkeypatch.setattr(scanner, "BYTE_REFERENCE_CACHE_LIMIT", 10)
+        pairwise_calls = []
+        real_pairwise = scanner.compare_byte_by_byte
+
+        def counting_pairwise(f1, f2, *a, **k):
+            pairwise_calls.append((f1, f2))
+            return real_pairwise(f1, f2, *a, **k)
+
+        monkeypatch.setattr(scanner, "compare_byte_by_byte", counting_pairwise)
+
+        found = scan_for_sample(str(sample), [str(dst)], by_hash=False, by_byte=True)
+
+        assert {f.path for f in found} == {str(dst / "copy.bin"), str(dst / "sample.bin")}
+        assert {tuple(p) for p in pairwise_calls} == {
+            (str(sample), str(dst / "copy.bin")),
+            (str(sample), str(dst / "sample.bin")),
+        }
+
+    def test_byte_only_same_size_changed_content_rejected(self, tmp_path):
+        """The RAM-reference path must still REJECT a same-size candidate
+        with different content — content_matches_bytes, not just sizes."""
+        sample, dst = self._sample_tree(tmp_path)
+        (dst / "sample.bin").write_bytes(b"SAMPLE" * 99 + b"YYYYY")  # 600 B, differs
+        found = scan_for_sample(str(sample), [str(dst)], by_hash=False, by_byte=True)
+        assert {f.path for f in found} == {str(dst / "copy.bin")}
+
 
 class TestCompareFolders:
     def _tree(self, tmp_path):

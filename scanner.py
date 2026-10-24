@@ -654,6 +654,17 @@ def scan_for_sample(
     # identity, not just by path string — otherwise a reported "copy" could be
     # the sample itself under another path, and deleting it destroys the sample.
     sample_key = inode_key(sample_stat)
+    # M6 parity with scan_directory's byte phase: with by_hash on, a full
+    # SHA-256 already proves content equality (a collision between
+    # same-sized files is outside the project's risk model), so the byte
+    # pass runs only as the content proof WITHOUT hashing — never as a
+    # second, ~n-times-I/O proof of the same fact. In byte-only mode the
+    # sample's content is read ONCE into RAM (up to
+    # BYTE_REFERENCE_CACHE_LIMIT) and every candidate is verified against
+    # it; an oversized or unreadable sample falls back to pairwise
+    # streaming, preserving the old behaviour.
+    verify_by_byte = by_byte and not by_hash
+    sample_ref = load_byte_reference(sample_path, sample_size) if verify_by_byte else None
 
     for directory in search_directories:
         if not os.path.exists(directory):
@@ -695,8 +706,15 @@ def scan_for_sample(
                                 cache_db.save_file_hash(filepath, stat.st_size, stat.st_mtime, full_hash=f_hash)
                         if f_hash != sample_hash or f_hash is None:
                             continue
-                    if by_byte:
-                        if not compare_byte_by_byte(sample_path, filepath):
+                    if verify_by_byte:
+                        # RAM reference when the sample fits the M6 cache cap,
+                        # pairwise streaming otherwise (or when it changed on
+                        # disk since the stat above — load_byte_reference
+                        # re-verifies the size it read).
+                        if sample_ref is not None:
+                            if not content_matches_bytes(sample_ref, filepath):
+                                continue
+                        elif not compare_byte_by_byte(sample_path, filepath):
                             continue
 
                     found_files.append(FileInfo(
