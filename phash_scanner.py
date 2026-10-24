@@ -1,11 +1,10 @@
 import os
-import fnmatch
 from typing import List, Dict, Tuple, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageOps
 
 from scanner import FileInfo, bounded_as_completed, default_futures_window, long_path
-from fs_filters import InodeDeduper, prune_dirs
+from fs_filters import InodeDeduper, prune_dirs, should_exclude
 from db_cache import cache_db
 from locales import get_text
 
@@ -91,25 +90,9 @@ def scan_similar_images(
         if progress_callback:
             progress_callback(msg, pct)
 
-    def should_exclude(path: str) -> bool:
-        """Same matching rules as scanner.scan_directory: whole path components,
-        or a normalized path prefix for patterns containing a separator."""
-        if not exclude_patterns:
-            return False
-        path_norm = os.path.normpath(path).lower()
-        components = path_norm.split(os.sep)
-        for pattern in exclude_patterns:
-            p = pattern.strip().lower()
-            if not p:
-                continue
-            if os.sep in p or (os.altsep and os.altsep in p) or p.endswith(":"):
-                pat_path = os.path.normpath(p)
-                if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
-                    return True
-                continue
-            if any(fnmatch.fnmatch(component, p) for component in components):
-                return True
-        return False
+    # User exclude patterns are matched by the shared fs_filters rules
+    # (whole components / normalized path prefixes) — one canonical
+    # implementation for every scanner (same as scanner.scan_directory).
 
     # 1. Discover all image files
     report(get_text("phash_discovering"), 0.0)
@@ -130,7 +113,7 @@ def scan_similar_images(
             prune_dirs(root, dirs)
             # Prune excluded directories so the walker never descends into them.
             if exclude_patterns:
-                dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
+                dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d), exclude_patterns)]
             for filename in filenames:
                 ext = os.path.splitext(filename.lower())[1]
                 if ext not in IMAGE_EXTENSIONS:
@@ -138,7 +121,7 @@ def scan_similar_images(
                         skipped_unsupported.add(ext)
                     continue
                 filepath = os.path.join(root, filename)
-                if should_exclude(filepath):
+                if should_exclude(filepath, exclude_patterns):
                     continue
                 try:
                     stat = os.stat(filepath)

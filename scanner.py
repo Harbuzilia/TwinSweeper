@@ -1,6 +1,5 @@
 import os
 import hashlib
-import fnmatch
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from fs_filters import (
     inode_key,
     is_system_path as is_system_path,  # re-export: results_view imports it from scanner (sweeper imports from fs_filters directly)
     prune_dirs,
+    should_exclude,
 )
 from locales import get_text
 from scan_index import open_scan_index
@@ -318,29 +318,9 @@ def scan_directory(
         if progress_callback:
             progress_callback(msg, percent)
 
-    def should_exclude(path: str) -> bool:
-        if not exclude_patterns:
-            return False
-        path_norm = os.path.normpath(path).lower()
-        # Match WHOLE path components only — a "Temp" chip must not swallow
-        # D:\Templates or "attempt_final": substring matching silently shrank
-        # scan results without any warning.
-        components = path_norm.split(os.sep)
-        for pattern in exclude_patterns:
-            pat_lower = pattern.strip().lower()
-            if not pat_lower:
-                continue
-            # A pattern containing a separator ("D:\Games", "temp\cache") is a
-            # path, not a single component — match it as a normalized prefix
-            # instead of silently ignoring it (round 3).
-            if os.sep in pat_lower or (os.altsep and os.altsep in pat_lower) or pat_lower.endswith(":"):
-                pat_path = os.path.normpath(pat_lower)
-                if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
-                    return True
-                continue
-            if any(fnmatch.fnmatch(component, pat_lower) for component in components):
-                return True
-        return False
+    # User exclude patterns are matched by the shared fs_filters rules
+    # (whole components / normalized path prefixes) — one canonical
+    # implementation for every scanner.
 
     total_found = 0
     # One physical file must never appear twice in the results. Hardlinks,
@@ -371,11 +351,11 @@ def scan_directory(
                 # the shared rules live in fs_filters (M2/M3).
                 prune_dirs(root, dirs)
                 if exclude_patterns:
-                    dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
+                    dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d), exclude_patterns)]
 
                 for filename in filenames:
                     filepath = os.path.join(root, filename)
-                    if should_exclude(filepath):
+                    if should_exclude(filepath, exclude_patterns):
                         continue
 
                     try:

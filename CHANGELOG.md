@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-10-24 — Вынос should_exclude в fs_filters (устранение дубля)
+
+- **Файлы:** `fs_filters.py`, `scanner.py`, `phash_scanner.py`,
+  `tests/test_fs_filters.py`.
+- **Что:** матчер пользовательских exclude-паттернов
+  `should_exclude(path, exclude_patterns)` переехал в `fs_filters.py` —
+  единая реализация для `scan_directory` и `scan_similar_images`. До этого
+  две почти идентичные копии-замыкания жили в `scanner.py` (внутри
+  `scan_directory`) и `phash_scanner.py` (внутри `scan_similar_images`),
+  различаясь только именами переменных и комментариями; мёртвые импорты
+  `fnmatch` из обоих модулей удалены. Семантика не менялась: whole-component
+  fnmatch (без substring-матчей «Temp» → Templates), паттерн с
+  разделителем/корнем диска — нормализованный префикс пути, пустые паттерны
+  игнорируются. Контракт закреплён 7 прямыми юнит-тестами в
+  `TestShouldExclude` поверх существующих интеграционных тестов обоих
+  сканеров (test_scanner / test_phash_scanner — зелёные без правок).
+- **Почему:** дубль = риск рассинхронизации правил исключения между
+  сканерами при следующей правке (замечание ревью этапа 1, п. (c)).
+
 ## 2026-10-10 — 2.2f Пострелизный техдолг: memory ceiling сканирования
 
 - **Файлы:** `scanner.py`, `phash_scanner.py`, `scan_index.py` (новый),

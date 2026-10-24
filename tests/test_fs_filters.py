@@ -14,6 +14,7 @@ from fs_filters import (
     inode_key,
     is_system_path,
     prune_dirs,
+    should_exclude,
 )
 
 
@@ -115,3 +116,40 @@ class TestIsSystemPath:
     ])
     def test_user_paths_with_system_like_substrings_not_flagged(self, path):
         assert is_system_path(path) is False
+
+
+class TestShouldExclude:
+    """User exclude-pattern matching — the ONE canonical implementation
+    (moved out of the near-identical closures in scanner.scan_directory and
+    phash_scanner.scan_similar_images). Anchors prove the contract survived
+    the move; the full scan-level matrix lives in tests/test_scanner.py."""
+
+    def test_no_patterns_excludes_nothing(self):
+        assert not should_exclude(r"D:\Data\f.txt", None)
+        assert not should_exclude(r"D:\Data\f.txt", [])
+
+    def test_component_match_is_case_insensitive(self):
+        assert should_exclude(r"D:\Data\Temp\f.txt", ["temp"])
+
+    def test_component_match_never_matches_substrings(self):
+        """A "Temp" chip must not swallow Templates or attempt_final:
+        substring matching silently shrank scan results (round 2)."""
+        assert not should_exclude(r"D:\Data\Templates\f.txt", ["temp"])
+        assert not should_exclude(r"D:\Data\attempt_final\f.txt", ["temp"])
+
+    def test_wildcard_matches_whole_component(self):
+        assert should_exclude(r"D:\Data\app.log", ["*.log"])
+        assert not should_exclude(r"D:\Data\app.logger.txt", ["*.log"])
+
+    def test_path_pattern_with_separator_excludes_subtree(self):
+        """A pattern containing a separator is a path, matched as a
+        normalized prefix (round 3) — not silently ignored."""
+        assert should_exclude(r"D:\Games\bin\f.exe", [r"D:\Games"])
+        assert not should_exclude(r"D:\Games2026\f.exe", [r"D:\Games"])
+
+    def test_drive_root_pattern_excludes_whole_drive(self):
+        assert should_exclude(r"E:\any\deep\f.bin", ["E:"])
+        assert not should_exclude(r"D:\f.bin", ["E:"])
+
+    def test_blank_patterns_ignored(self):
+        assert not should_exclude(r"D:\Data\f.txt", ["", "   "])
