@@ -342,3 +342,27 @@ class TestCompleteLinkageClustering:
         names = {os.path.basename(f.path) for f in next(iter(results.values()))}
         assert len(names) == 2
         assert not {"a.png", "c.png"} <= names
+
+
+class TestBoundedWindow:
+    """2.2f: the phash phase feeds a bounded futures window — clusters must
+    come out identical to the unbounded submission it replaced."""
+
+    def test_results_identical_with_tiny_window(self, tmp_path):
+        d = tmp_path / "photos"
+        d.mkdir()
+        make_gradient_image(d / "g1.png")
+        make_gradient_image(d / "g2.png")
+        make_noise_image(d / "n1.png", seed=5)
+        make_noise_image(d / "n2.png", seed=5)
+        make_noise_image(d / "solo.png", seed=99)
+
+        def groups(results):
+            # Group KEYS carry numbering that follows completion order; the
+            # clustered membership is the contract.
+            return sorted(tuple(sorted(f.path for f in files)) for files in results.values())
+
+        baseline = scan_similar_images([str(d)])
+        small = scan_similar_images([str(d)], futures_window=1)
+        assert len(baseline) == 2
+        assert groups(small) == groups(baseline)

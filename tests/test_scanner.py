@@ -1016,3 +1016,287 @@ class TestUnicodePaths:
 
         assert len(results) == 1
         assert len(next(iter(results.values()))) == 2
+
+
+class TestBoundedFuturesWindow:
+    """2.2f memory ceiling: the hash phase must keep only a bounded window of
+    pending futures instead of submitting every candidate at once (one Future
+    per file used to sit in RAM for the whole scan)."""
+
+    def test_window_caps_pending_submissions(self):
+        """With blocking tasks the feeder must stop at exactly `window`
+        submitted futures and resume only as results are consumed."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_items = 12
+        window = 4
+        release = threading.Event()
+        lock = threading.Lock()
+        started = []
+
+        def blocking_fn(item):
+            with lock:
+                started.append(item)
+            release.wait(timeout=10)
+            return item * 2
+
+        class CountingExecutor:
+            """Delegates to a real executor while counting submit() calls."""
+
+            def __init__(self, inner):
+                self._inner = inner
+                self.submitted = 0
+
+            def submit(self, fn, *args):
+                self.submitted += 1
+                return self._inner.submit(fn, *args)
+
+            def shutdown(self, *args, **kwargs):
+                return self._inner.shutdown(*args, **kwargs)
+
+        ex = CountingExecutor(ThreadPoolExecutor(max_workers=2))
+        results = []
+
+        def consume():
+            for fut in scanner.bounded_as_completed(ex, blocking_fn, range(n_items), window):
+                results.append(fut.result())
+
+        t = threading.Thread(target=consume, daemon=True)
+        t.start()
+        try:
+            deadline = time.monotonic() + 10
+            while ex.submitted < window and time.monotonic() < deadline:
+                time.sleep(0.01)
+            # Grace period: an unbounded implementation would have submitted
+            # all 12 items by now.
+            time.sleep(0.25)
+            with lock:
+                snapshot_submitted = ex.submitted
+                snapshot_started = len(started)
+            assert snapshot_submitted == window
+            assert snapshot_started <= 2  # only max_workers can be inside fn
+
+            release.set()
+            t.join(timeout=15)
+            assert not t.is_alive(), "consumer did not finish after release"
+            assert sorted(results) == [i * 2 for i in range(n_items)]
+            assert ex.submitted == n_items
+        finally:
+            release.set()
+            ex.shutdown(wait=False, cancel_futures=True)
+
+    def test_cancel_stops_feeding(self):
+        """Once is_cancelled() flips, no further items may be submitted:
+        with 50 items and window=2 at most the primed window ever starts."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        flag = [False]
+        lock = threading.Lock()
+        started = []
+
+        def fn(item):
+            with lock:
+                started.append(item)
+                if len(started) == 1:
+                    flag[0] = True
+            return item
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            got = list(scanner.bounded_as_completed(ex, fn, range(50), 2, lambda: flag[0]))
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        with lock:
+            n_started = len(started)
+        assert len(got) <= 2
+        assert n_started <= 2, "feeder kept submitting after cancel"
+
+    def test_results_match_unbounded_map(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fn(x):
+            return x * x
+
+        items = list(range(30))
+        ex = ThreadPoolExecutor(max_workers=4)
+        try:
+            got = [f.result() for f in scanner.bounded_as_completed(ex, fn, items, 3)]
+        finally:
+            ex.shutdown(wait=True)
+        assert sorted(got) == sorted(map(fn, items))
+
+    def test_empty_items_submit_nothing(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        ex = ThreadPoolExecutor(max_workers=2)
+        try:
+            got = list(scanner.bounded_as_completed(ex, lambda x: x, [], 4))
+        finally:
+            ex.shutdown(wait=True)
+        assert got == []
+
+    def test_task_exceptions_surface_via_future(self):
+        """The helper yields futures; a failing task must surface on
+        future.result() exactly like as_completed does (caller handles it)."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fn(x):
+            if x == 2:
+                raise ValueError("boom")
+            return x
+
+        ex = ThreadPoolExecutor(max_workers=2)
+        try:
+            futures = list(scanner.bounded_as_completed(ex, fn, range(4), 2))
+            ok, errors = [], 0
+            for f in futures:
+                try:
+                    ok.append(f.result())
+                except ValueError:
+                    errors += 1
+        finally:
+            ex.shutdown(wait=True)
+        assert errors == 1
+        assert sorted(ok) == [0, 1, 3]
+
+    def test_window_must_be_positive(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            with pytest.raises(ValueError):
+                list(scanner.bounded_as_completed(ex, lambda x: x, [1], 0))
+        finally:
+            ex.shutdown(wait=True)
+
+    def test_default_window_scales_with_workers(self):
+        assert scanner.default_futures_window(1) >= 64
+        assert scanner.default_futures_window(8) >= 64
+        assert scanner.default_futures_window(64) == 256
+
+
+class TestMemoryCeiling:
+    """2.2f: peak RAM of a scan must stay bounded — unique-size files never
+    become FileInfo objects, hashing runs in bounded batches/windows, and the
+    spill index is closed on every exit path. Result semantics must not move."""
+
+    @staticmethod
+    def _mixed_tree(tmp_path):
+        """3x identical 1000B + 2x identical 512B + 2x same-size(777B) but
+        DIFFERENT content (candidates that must not group) + uniques."""
+        for i in range(3):
+            d = tmp_path / f"big{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"A" * 1000)
+        for i in range(2):
+            d = tmp_path / f"mid{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"B" * 512)
+        (tmp_path / "x1").mkdir()
+        (tmp_path / "x2").mkdir()
+        (tmp_path / "x1" / "diff.bin").write_bytes(b"C" * 777)
+        (tmp_path / "x2" / "diff.bin").write_bytes(b"D" * 777)
+        (tmp_path / "lonely.bin").write_bytes(b"U" * 333)
+
+    def test_results_identical_with_tiny_window_and_batches(self, tmp_path, monkeypatch):
+        self._mixed_tree(tmp_path)
+        baseline = scan_directory([str(tmp_path)], by_hash=True, use_cache=False)
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        small = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+        assert small == baseline
+        assert len(baseline) == 2
+        assert sorted(len(g) for g in baseline.values()) == [2, 3]
+
+    def test_size_group_never_split_across_batches(self, tmp_path, monkeypatch):
+        """3 copies of A + 2 copies of B, all the SAME size: one size group
+        of 5. A batch size of 2 must not split it, or same-content members
+        land in different batches and the groups shatter."""
+        for i in range(3):
+            d = tmp_path / f"a{i}"
+            d.mkdir()
+            (d / "f.bin").write_bytes(b"A" * 70)
+        for i in range(2):
+            d = tmp_path / f"b{i}"
+            d.mkdir()
+            (d / "f.bin").write_bytes(b"B" * 70)
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+        assert len(results) == 2
+        assert sorted(len(g) for g in results.values()) == [2, 3]
+
+    def test_unique_size_files_never_materialized_as_fileinfo(self, dup_tree, monkeypatch):
+        created = []
+
+        class RecordingFileInfo(scanner.FileInfo):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self.path)
+
+        monkeypatch.setattr(scanner, "FileInfo", RecordingFileInfo)
+        scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        # a.txt / other.log have unique sizes — with the spill index they are
+        # rows on disk and never become FileInfo objects.
+        assert created == [p for p in created if p.endswith("dup.bin")]
+        assert len(created) == 3
+
+    def test_index_closed_on_success_and_on_cancel(self, dup_tree, monkeypatch):
+        import scan_index as scan_index_module
+
+        created = []
+        real_open = scan_index_module.open_scan_index
+
+        def capturing_open():
+            idx = real_open()
+            created.append(idx)
+            return idx
+
+        monkeypatch.setattr(scanner, "open_scan_index", capturing_open)
+
+        scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        assert created and created[-1].closed
+
+        flag = [False]
+
+        def cancelling_hash(path):
+            flag[0] = True
+            return "deadbeef"
+
+        monkeypatch.setattr(scanner, "get_file_hash", cancelling_hash)
+        results = scan_directory([str(dup_tree)], by_hash=True, turbo_mode=False, use_cache=False, cancel_flag=flag, max_workers=1)
+        assert results == {}
+        assert created[-1].closed
+
+    def test_progress_counters_preserved_with_small_window(self, tmp_path, monkeypatch):
+        from locales import get_text
+
+        for i in range(5):
+            for j in range(2):
+                d = tmp_path / f"p{i}_{j}"
+                d.mkdir()
+                (d / "f.bin").write_bytes(bytes([65 + i]) * (100 + i))
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        messages = []
+        scan_directory(
+            [str(tmp_path)], by_hash=True, use_cache=False, futures_window=1,
+            progress_callback=lambda m, p: messages.append((m, p)),
+        )
+        msgs = [m for m, _ in messages]
+        pcts = [p for _, p in messages if p is not None]
+        # The hashed counter must still reach the full candidate total across
+        # batches (ETA/progress contract), and the scan must end at 100%.
+        assert any(m.startswith(get_text("scan_hashed").format(10, 10)) for m in msgs)
+        assert pcts[-1] == 1.0
+        assert pcts == sorted(pcts)
+
+    def test_fallback_to_memory_index_scans_correctly(self, dup_tree, monkeypatch):
+        import sqlite3
+
+        import scan_index as scan_index_module
+
+        def boom(*args, **kwargs):
+            raise sqlite3.OperationalError("spill unavailable")
+
+        monkeypatch.setattr(scan_index_module.sqlite3, "connect", boom)
+        results = scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        assert len(results) == 1
+        assert len(next(iter(results.values()))) == 3

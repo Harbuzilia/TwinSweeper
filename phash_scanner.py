@@ -1,10 +1,10 @@
 import os
 import fnmatch
 from typing import List, Dict, Tuple, Optional, Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageOps
 
-from scanner import FileInfo, long_path
+from scanner import FileInfo, bounded_as_completed, default_futures_window, long_path
 from fs_filters import InodeDeduper, prune_dirs
 from db_cache import cache_db
 from locales import get_text
@@ -77,7 +77,8 @@ def scan_similar_images(
     progress_callback: Optional[Callable[[str, Optional[float]], None]] = None,
     cancel_flag: Optional[List[bool]] = None,
     exclude_patterns: Optional[List[str]] = None,
-    max_workers: int = 8
+    max_workers: int = 8,
+    futures_window: Optional[int] = None
 ) -> Dict[str, List[FileInfo]]:
     """
     Scans directories for visually similar images using perceptual hashing (pHash/dHash).
@@ -191,9 +192,11 @@ def scan_similar_images(
     # No `with` block — see scanner.scan_directory: __exit__ would join
     # in-flight phash tasks and freeze a "cancelled" scan.
     executor = ThreadPoolExecutor(max_workers=max_workers)
-    futures = {executor.submit(get_or_calc_phash, info): info for info in image_files}
+    # 2.2f memory ceiling: feed a bounded window instead of holding one
+    # Future per image for the whole phase.
+    window = futures_window if futures_window is not None else default_futures_window(max_workers)
     cancelled = False
-    for future in as_completed(futures):
+    for future in bounded_as_completed(executor, get_or_calc_phash, image_files, min(window, total_images), is_cancelled):
         if is_cancelled():
             cancelled = True
             break
