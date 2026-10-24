@@ -1,6 +1,5 @@
 import os
 import hashlib
-import fnmatch
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from fs_filters import (
     inode_key,
     is_system_path as is_system_path,  # re-export: results_view imports it from scanner (sweeper imports from fs_filters directly)
     prune_dirs,
+    should_exclude,
 )
 from locales import get_text
 from scan_index import open_scan_index
@@ -318,29 +318,9 @@ def scan_directory(
         if progress_callback:
             progress_callback(msg, percent)
 
-    def should_exclude(path: str) -> bool:
-        if not exclude_patterns:
-            return False
-        path_norm = os.path.normpath(path).lower()
-        # Match WHOLE path components only — a "Temp" chip must not swallow
-        # D:\Templates or "attempt_final": substring matching silently shrank
-        # scan results without any warning.
-        components = path_norm.split(os.sep)
-        for pattern in exclude_patterns:
-            pat_lower = pattern.strip().lower()
-            if not pat_lower:
-                continue
-            # A pattern containing a separator ("D:\Games", "temp\cache") is a
-            # path, not a single component — match it as a normalized prefix
-            # instead of silently ignoring it (round 3).
-            if os.sep in pat_lower or (os.altsep and os.altsep in pat_lower) or pat_lower.endswith(":"):
-                pat_path = os.path.normpath(pat_lower)
-                if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
-                    return True
-                continue
-            if any(fnmatch.fnmatch(component, pat_lower) for component in components):
-                return True
-        return False
+    # User exclude patterns are matched by the shared fs_filters rules
+    # (whole components / normalized path prefixes) — one canonical
+    # implementation for every scanner.
 
     total_found = 0
     # One physical file must never appear twice in the results. Hardlinks,
@@ -371,11 +351,11 @@ def scan_directory(
                 # the shared rules live in fs_filters (M2/M3).
                 prune_dirs(root, dirs)
                 if exclude_patterns:
-                    dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d))]
+                    dirs[:] = [d for d in dirs if not should_exclude(os.path.join(root, d), exclude_patterns)]
 
                 for filename in filenames:
                     filepath = os.path.join(root, filename)
-                    if should_exclude(filepath):
+                    if should_exclude(filepath, exclude_patterns):
                         continue
 
                     try:
@@ -674,6 +654,17 @@ def scan_for_sample(
     # identity, not just by path string — otherwise a reported "copy" could be
     # the sample itself under another path, and deleting it destroys the sample.
     sample_key = inode_key(sample_stat)
+    # M6 parity with scan_directory's byte phase: with by_hash on, a full
+    # SHA-256 already proves content equality (a collision between
+    # same-sized files is outside the project's risk model), so the byte
+    # pass runs only as the content proof WITHOUT hashing — never as a
+    # second, ~n-times-I/O proof of the same fact. In byte-only mode the
+    # sample's content is read ONCE into RAM (up to
+    # BYTE_REFERENCE_CACHE_LIMIT) and every candidate is verified against
+    # it; an oversized or unreadable sample falls back to pairwise
+    # streaming, preserving the old behaviour.
+    verify_by_byte = by_byte and not by_hash
+    sample_ref = load_byte_reference(sample_path, sample_size) if verify_by_byte else None
 
     for directory in search_directories:
         if not os.path.exists(directory):
@@ -715,8 +706,15 @@ def scan_for_sample(
                                 cache_db.save_file_hash(filepath, stat.st_size, stat.st_mtime, full_hash=f_hash)
                         if f_hash != sample_hash or f_hash is None:
                             continue
-                    if by_byte:
-                        if not compare_byte_by_byte(sample_path, filepath):
+                    if verify_by_byte:
+                        # RAM reference when the sample fits the M6 cache cap,
+                        # pairwise streaming otherwise (or when it changed on
+                        # disk since the stat above — load_byte_reference
+                        # re-verifies the size it read).
+                        if sample_ref is not None:
+                            if not content_matches_bytes(sample_ref, filepath):
+                                continue
+                        elif not compare_byte_by_byte(sample_path, filepath):
                             continue
 
                     found_files.append(FileInfo(

@@ -16,6 +16,7 @@ Rules every walk must agree on (M2/M3):
   grouping such a pair as "duplicates" would let the user delete a file and
   thereby destroy the very "original" it pointed at.
 """
+import fnmatch
 import os
 from typing import List, Optional, Set, Tuple
 
@@ -137,3 +138,38 @@ class InodeDeduper:
             return True
         self._seen.add(key)
         return False
+
+
+def should_exclude(path: str, exclude_patterns: Optional[List[str]]) -> bool:
+    """User exclude-pattern matcher — the ONE canonical implementation for
+    every scanner (moved out of the two near-identical closures that lived
+    in ``scanner.scan_directory`` and ``phash_scanner.scan_similar_images``;
+    semantics unchanged by the move).
+
+    Rules (round 2/3 semantics):
+
+    * ``path`` is matched against WHOLE path components only — a "Temp"
+      chip must not swallow ``D:\\Templates`` or "attempt_final": substring
+      matching silently shrank scan results without any warning;
+    * a pattern containing a separator ("D:\\Games", "temp\\cache") or a
+      bare drive root ("D:") is a path, not a single component — it matches
+      as a normalized prefix of the candidate path instead of being
+      silently ignored;
+    * blank patterns are ignored.
+    """
+    if not exclude_patterns:
+        return False
+    path_norm = os.path.normpath(path).lower()
+    components = path_norm.split(os.sep)
+    for pattern in exclude_patterns:
+        pat_lower = pattern.strip().lower()
+        if not pat_lower:
+            continue
+        if os.sep in pat_lower or (os.altsep and os.altsep in pat_lower) or pat_lower.endswith(":"):
+            pat_path = os.path.normpath(pat_lower)
+            if path_norm == pat_path or path_norm.startswith(pat_path + os.sep):
+                return True
+            continue
+        if any(fnmatch.fnmatch(component, pat_lower) for component in components):
+            return True
+    return False
