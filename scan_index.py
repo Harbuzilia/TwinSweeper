@@ -233,7 +233,15 @@ class SqliteScanIndex(ScanIndex):
         self._flush()
         if self.sealed:
             return
-        self.sealed = True
+        # The seal is the heaviest write of the spill (two index builds, a
+        # full-table UPDATE, a table rewrite), so it gets the same M1 guard as
+        # _flush(): a dead write must reach the user as the actionable message
+        # naming %TEMP%, not as a bare 'database or disk is full'. `sealed` is
+        # set only after the seal commits: on failure the partial transaction
+        # is rolled back and the index stays unsealed, so a repeated finish()
+        # retries the seal (each step is idempotent) instead of leaving a
+        # half-sealed table that iteration cannot read ('no such column:
+        # first_rowid').
         # Sealing turns discovery order into an index order, once, after the
         # bulk load (inserting into an unindexed table first is several times
         # faster):
@@ -246,21 +254,35 @@ class SqliteScanIndex(ScanIndex):
         #                exactly "groups by first appearance of their size, rows
         #                in discovery order", served by the index with no sorter
         #                and no temp files (2.2f memory ceiling).
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS dup (size INTEGER PRIMARY KEY, first_rowid INTEGER NOT NULL)"
-        )
-        self._conn.execute(
-            "INSERT OR REPLACE INTO dup (size, first_rowid) "
-            "SELECT size, MIN(rowid) FROM idx GROUP BY size HAVING COUNT(*) > 1"
-        )
-        self._conn.execute("ALTER TABLE idx ADD COLUMN first_rowid INTEGER")
-        self._conn.execute(
-            "UPDATE idx SET first_rowid = (SELECT first_rowid FROM dup WHERE dup.size = idx.size)"
-        )
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_first ON idx(first_rowid)")
-        self._conn.execute("DROP TABLE dup")
-        self._conn.commit()
+        try:
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS dup (size INTEGER PRIMARY KEY, first_rowid INTEGER NOT NULL)"
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO dup (size, first_rowid) "
+                "SELECT size, MIN(rowid) FROM idx GROUP BY size HAVING COUNT(*) > 1"
+            )
+            # ADD COLUMN is the one non-repeatable step: a retry after a partial
+            # seal (DDL autocommitted before the failure) must not die on
+            # 'duplicate column name'.
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(idx)")}
+            if "first_rowid" not in columns:
+                self._conn.execute("ALTER TABLE idx ADD COLUMN first_rowid INTEGER")
+            self._conn.execute(
+                "UPDATE idx SET first_rowid = (SELECT first_rowid FROM dup WHERE dup.size = idx.size)"
+            )
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_first ON idx(first_rowid)")
+            self._conn.execute("DROP TABLE IF EXISTS dup")
+            self._conn.commit()
+        except sqlite3.Error as ex:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            logger.error("scan index seal failed: %s", ex)
+            raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
+        self.sealed = True
 
     def candidate_stats(self, by_size: bool = True) -> Tuple[int, int]:
         if not by_size:

@@ -268,6 +268,62 @@ class TestSqliteSpill:
             idx._conn = real_conn
             idx.close()
 
+    def test_finish_seal_error_is_reraised_and_retryable(self, tmp_path):
+        """The seal (both index builds, first_rowid assignment) is the heaviest
+        write in the spill, so a failure there needs the same M1 message as a
+        flush failure — and must not mark the index sealed: `sealed` is set
+        only after the seal commit, so a repeated finish() retries instead of
+        leaving a half-sealed table that iteration cannot read."""
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingSealConn:
+            """Delegates to the real connection until the seal's last index
+            build: the flush and every earlier seal step succeed, so the
+            failure can only come from the seal itself."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *args, **kwargs):
+                if "CREATE INDEX IF NOT EXISTS idx_first" in sql:
+                    raise sqlite3.OperationalError("database or disk is full")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def executemany(self, sql, rows, *args, **kwargs):
+                return self._real.executemany(sql, rows, *args, **kwargs)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def close(self):
+                pass
+
+        idx.add("p", "p", 1, 0.0, 0.0)
+        idx.add("q", "q", 1, 0.0, 0.0)
+        idx._flush()  # buffer drained: a failure now can only be the seal
+        real_conn = idx._conn
+        try:
+            idx._conn = FailingSealConn(real_conn)
+            with pytest.raises(RuntimeError) as excinfo:
+                idx.finish()
+            message = str(excinfo.value)
+            assert "%TEMP%" in message
+            assert "database or disk is full" in message
+            assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+            assert idx.sealed is False, "a failed seal must leave the index open for a retry"
+            idx._conn = real_conn
+            idx.finish()  # retry on a healthy connection: the seal is idempotent
+            assert idx.sealed is True
+            assert list(idx.iter_candidate_groups(by_size=True)) == [
+                [("p", "p", 1, 0.0, 0.0), ("q", "q", 1, 0.0, 0.0)]
+            ]
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
     def test_failed_connect_cleans_own_temp_file(self, monkeypatch):
         import os
         captured = {}
