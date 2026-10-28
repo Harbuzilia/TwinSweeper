@@ -90,6 +90,20 @@ class TestIndexContract:
         assert index.candidate_stats(by_size=True) == (0, 0)
         assert list(index.iter_candidate_groups(by_size=True)) == []
 
+    def test_groups_follow_size_first_appearance_order(self, index):
+        """L1/L2: both backends agree — groups stream in the order their size
+        first appeared in the walk, NOT in ascending size order. Rows inside a
+        group stay in discovery order."""
+        b1 = (r"C:\d\b1.bin", "b1.bin", 500, 1.0, 1.0)
+        a1 = (r"C:\d\a1.bin", "a1.bin", 100, 2.0, 2.0)
+        b2 = (r"C:\d\b2.bin", "b2.bin", 500, 3.0, 3.0)
+        a2 = (r"C:\d\a2.bin", "a2.bin", 100, 4.0, 4.0)
+        _fill(index, [b1, a1, b2, a2])
+        groups = list(index.iter_candidate_groups(by_size=True))
+        # size 500 was seen first (B, A, B, A) — it must come out first even
+        # though 100 < 500.
+        assert groups == [[b1, b2], [a1, a2]]
+
     def test_iteration_is_repeatable(self, index):
         _fill(index)
         first = list(index.iter_candidate_groups(by_size=True))
@@ -102,8 +116,10 @@ class TestSqliteSpill:
         """ORDER BY / CREATE INDEX must not spill to SQLite's own temp dir:
         a locked-down or full %TEMP% used to abort mid-iteration with
         'unable to open database file' (caught by the 50k benchmark).
-        temp_store=MEMORY + a size index (finish()) keep the streaming
-        query on the index order — no sorter, no temp files."""
+        temp_store=MEMORY + the idx_first index (finish()) keep the streaming
+        query on the index order — no sorter, no temp files. A sorter would
+        also mean RAM proportional to the candidates, which is what the 2.2f
+        memory ceiling exists to avoid."""
         idx = SqliteScanIndex(str(tmp_path / "idx.db"))
         try:
             mode = idx._conn.execute("PRAGMA temp_store").fetchone()[0]
@@ -111,12 +127,20 @@ class TestSqliteSpill:
             for i in range(10):
                 idx.add(f"p{i}", f"p{i}", 100, float(i), float(i))
             idx.finish()
+            plan = [
+                r[3] for r in idx._conn.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT size, path, name, created, modified FROM idx "
+                    "WHERE first_rowid IS NOT NULL ORDER BY first_rowid, rowid"
+                )
+            ]
+            assert not any("TEMP B-TREE" in step for step in plan), plan
             names = [
                 r[0] for r in idx._conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='idx'"
                 )
             ]
-            assert names, "finish() must create the size index that serves ORDER BY size, rowid"
+            assert names, "finish() must create the indexes iteration reads (idx_size, idx_first)"
             (group,) = list(idx.iter_candidate_groups(by_size=True))
             assert len(group) == 10
         finally:

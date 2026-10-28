@@ -11,10 +11,11 @@ size are ever needed again. This module keeps the discovery rows
   walk's RAM stays O(batch) regardless of tree size;
 * ``MemoryScanIndex`` is the tuple-row fallback when SQLite is unavailable —
   still ~4x lighter per file than a full ``FileInfo``;
-* both stream whole size-groups lazily (``iter_candidate_groups``) in
-  discovery order (``ORDER BY size, rowid`` == the old ``defaultdict``
-  insertion order), so ``FileInfo`` objects are constructed only for
-  candidate files, group by group.
+* both stream whole size-groups lazily (``iter_candidate_groups``) in the
+  old ``defaultdict`` order: groups by the first appearance of their size in
+  the walk, rows inside a group in discovery order. ``FileInfo`` objects are
+  built only for candidate files, group by group, and the backend in use
+  never changes the order of the scan's results.
 
 Rows are plain tuples ``(path, name, size, created, modified)`` — the exact
 constructor fields of ``scanner.FileInfo``. ``FileInfo`` is deliberately NOT
@@ -97,6 +98,8 @@ class MemoryScanIndex(ScanIndex):
                 yield list(self._all)
             return
         for rows in self._by_size.values():
+            # dict insertion order == the size's first appearance in the walk,
+            # which is exactly what SqliteScanIndex streams back too.
             if len(rows) > 1:
                 yield rows
 
@@ -108,10 +111,11 @@ class MemoryScanIndex(ScanIndex):
 
 class SqliteScanIndex(ScanIndex):
     """Spill-to-disk discovery index: rows live in a throwaway SQLite DB, and
-    candidate groups are streamed back through a lazy cursor."""
+    candidate groups are streamed back lazily, one ordered index scan."""
 
     def __init__(self, db_path: Optional[str] = None) -> None:
         self.closed = False
+        self.sealed = False
         self._owns_file = db_path is None
         self._buffer: List[Row] = []
         if db_path is None:
@@ -175,11 +179,35 @@ class SqliteScanIndex(ScanIndex):
 
     def finish(self) -> None:
         self._flush()
-        # Serves the streaming query's ORDER BY size, rowid as an index scan
-        # (index entries are rowid-ordered within each size) — no sorter and
-        # no temp files at iteration time. Built once, after the bulk load:
-        # inserting into an unindexed table first is several times faster.
+        if self.sealed:
+            return
+        self.sealed = True
+        # Sealing turns discovery order into an index order, once, after the
+        # bulk load (inserting into an unindexed table first is several times
+        # faster):
+        #  * idx_size  — GROUP BY size / MIN(rowid) below (and candidate_stats);
+        #  * dup       — one row per duplicate size: the rowid of its first
+        #                occurrence, i.e. the group's place in the walk;
+        #  * first_rowid — that place copied onto every candidate row, NULL for
+        #                unique-size rows (never streamed);
+        #  * idx_first — the streaming scan's order: `first_rowid, rowid` is
+        #                exactly "groups by first appearance of their size, rows
+        #                in discovery order", served by the index with no sorter
+        #                and no temp files (2.2f memory ceiling).
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS dup (size INTEGER PRIMARY KEY, first_rowid INTEGER NOT NULL)"
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO dup (size, first_rowid) "
+            "SELECT size, MIN(rowid) FROM idx GROUP BY size HAVING COUNT(*) > 1"
+        )
+        self._conn.execute("ALTER TABLE idx ADD COLUMN first_rowid INTEGER")
+        self._conn.execute(
+            "UPDATE idx SET first_rowid = (SELECT first_rowid FROM dup WHERE dup.size = idx.size)"
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_first ON idx(first_rowid)")
+        self._conn.execute("DROP TABLE dup")
         self._conn.commit()
 
     def candidate_stats(self, by_size: bool = True) -> Tuple[int, int]:
@@ -200,12 +228,14 @@ class SqliteScanIndex(ScanIndex):
             cur = self._conn.execute("SELECT path, name, size, created, modified FROM idx ORDER BY rowid")
             yield [tuple(r) for r in cur]
             return
-        # rowid == insert order, so rows within a size group keep discovery
-        # order exactly like the old defaultdict(list) index did.
+        # L1/L2: `first_rowid, rowid` is the size-discovery order of the old
+        # defaultdict(list) index — groups by the first appearance of their
+        # size, rows in discovery order — and it is an index scan, not a
+        # sorter, so the ordering costs no RAM and no temp files. Consecutive
+        # rows always share a size, so a size change marks a group boundary.
         cur = self._conn.execute(
             "SELECT size, path, name, created, modified FROM idx "
-            "WHERE size IN (SELECT size FROM idx GROUP BY size HAVING COUNT(*) > 1) "
-            "ORDER BY size, rowid"
+            "WHERE first_rowid IS NOT NULL ORDER BY first_rowid, rowid"
         )
         group: List[Row] = []
         current_size = None
