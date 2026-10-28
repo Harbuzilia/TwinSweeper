@@ -253,6 +253,46 @@ class TestSqliteSpill:
         monkeypatch.setattr(scan_index.sqlite3, "connect", real_connect)
 
 
+class TestStaleTempCleanup:
+    def test_stale_spill_files_are_swept_only(self, tmp_path, monkeypatch, caplog):
+        """L3: a killed process never reaches close(), so its spill DB stays
+        in %TEMP%. The next open_scan_index() sweeps files older than the
+        documented age, leaves fresh ones (a live scan) and anything that is
+        not ours alone."""
+        import logging
+        import os
+        import time
+
+        old = time.time() - (scan_index.STALE_SCAN_INDEX_AGE_SECONDS + 60)
+        stale = tmp_path / "twinsweeper_scanidx_stale.db"
+        stale.write_bytes(b"x")
+        os.utime(str(stale), (old, old))
+        fresh = tmp_path / "twinsweeper_scanidx_fresh.db"
+        fresh.write_bytes(b"x")
+        foreign = tmp_path / "someone_elses.db"
+        foreign.write_bytes(b"x")
+        os.utime(str(foreign), (old, old))
+
+        monkeypatch.setattr(scan_index.tempfile, "gettempdir", lambda: str(tmp_path))
+        with caplog.at_level(logging.WARNING):
+            idx = open_scan_index(str(tmp_path / "own.db"))
+        idx.close()
+
+        assert not stale.exists(), "an abandoned spill file must be removed"
+        assert fresh.exists(), "another live scan's index must survive"
+        assert foreign.exists(), "only twinsweeper_scanidx_*.db files are ours"
+        assert any("stale scan index" in r.message for r in caplog.records)
+
+    def test_cleanup_survives_a_broken_temp_dir(self, monkeypatch):
+        """Cleanup is best effort: an unreadable %TEMP% must not break a scan
+        that otherwise works (the spill itself reports its own failure)."""
+        def boom(*args, **kwargs):
+            raise OSError("no temp dir")
+
+        monkeypatch.setattr(scan_index.tempfile, "gettempdir", boom)
+        assert scan_index._cleanup_stale_temp_files() == 0
+
+
 class TestOpenScanIndexFallback:
     def test_falls_back_to_memory_when_sqlite_fails(self, monkeypatch):
         def boom(*args, **kwargs):

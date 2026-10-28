@@ -24,11 +24,15 @@ circular import and of any per-row object overhead.
 
 The spill DB is transient scan state (a crash simply means "rescan"), hence
 ``journal_mode=MEMORY``/``synchronous=OFF`` for insert speed — unlike the
-persistent hash cache in ``db_cache`` which uses WAL.
+persistent hash cache in ``db_cache`` which uses WAL. A process killed before
+``close()`` leaves its file in %TEMP%; ``open_scan_index`` sweeps spill files
+older than ``STALE_SCAN_INDEX_AGE_SECONDS`` so they never pile up.
 """
+import glob
 import os
 import sqlite3
 import tempfile
+import time
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from app_logging import get_logger
@@ -41,6 +45,45 @@ Row = Tuple[str, str, int, float, float]
 
 # Rows buffered in RAM before one executemany flush into the spill DB.
 INSERT_BATCH_ROWS = 5000
+
+# Name of the throwaway spill DBs in %TEMP% (prefix of the mkstemp name).
+_TEMP_DB_GLOB = "twinsweeper_scanidx_*.db"
+
+# A spill DB is removed by close(); a process killed without unwinding leaves
+# it behind. Only files older than this are swept: a live scan keeps rewriting
+# its index, so its mtime stays fresh, and even a multi-hour scan on a slow
+# disk never looks abandoned. 24h keeps a parallel run of the app (or a pause
+# in a debugger overnight) safe.
+STALE_SCAN_INDEX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _cleanup_stale_temp_files(max_age_seconds: int = STALE_SCAN_INDEX_AGE_SECONDS) -> int:
+    """Delete spill DBs left in %TEMP% by a process that never reached close().
+
+    Best effort: the files are transient scan artifacts, never user data, so
+    any filesystem error simply leaves one alone. Returns the number removed.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        candidates = glob.glob(os.path.join(tempfile.gettempdir(), _TEMP_DB_GLOB))
+    except (OSError, ValueError):
+        return 0
+    for path in candidates:
+        try:
+            age_seconds = now - os.path.getmtime(path)
+            if age_seconds <= max_age_seconds:
+                continue
+            os.remove(path)
+        except OSError:
+            continue
+        removed += 1
+        logger.warning(
+            "removed stale scan index %s (%.0f h old, left by an interrupted scan)",
+            path,
+            age_seconds / 3600,
+        )
+    return removed
 
 
 class ScanIndex:
@@ -264,6 +307,7 @@ class SqliteScanIndex(ScanIndex):
 def open_scan_index(db_path: Optional[str] = None) -> ScanIndex:
     """SQLite spill when possible, in-RAM tuple rows when not: an unwritable
     temp location must never break a scan that worked before 2.2f."""
+    _cleanup_stale_temp_files()
     try:
         return SqliteScanIndex(db_path)
     except (sqlite3.Error, OSError) as ex:
