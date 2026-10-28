@@ -341,6 +341,77 @@ class TestSqliteSpill:
         monkeypatch.setattr(scan_index.sqlite3, "connect", real_connect)
 
 
+class TestReadErrorGuards:
+    """M1 follow-up: a failing spill READ must reach the caller as the same
+    actionable %TEMP% message as a failing spill write.
+
+    scan_directory asks the index for its stats and then for its candidate
+    groups mid-scan, so a bare 'disk I/O error' (or 'Cannot operate on a
+    closed database') would surface verbatim in the UI.
+    """
+
+    @staticmethod
+    def _failing_read_conn(real):
+        class FailingReadConn:
+            """Delegates to the real connection, but every read of the idx
+            table fails — writes were already done by the fill."""
+
+            def execute(self, sql, *args, **kwargs):
+                if "FROM idx" in sql:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return real.execute(sql, *args, **kwargs)
+
+            def executemany(self, sql, rows, *args, **kwargs):
+                return real.executemany(sql, rows, *args, **kwargs)
+
+            def commit(self):
+                return real.commit()
+
+            def rollback(self):
+                return real.rollback()
+
+            def close(self):
+                pass
+
+        return FailingReadConn()
+
+    def test_candidate_stats_query_error_is_reraised_with_actionable_message(self, tmp_path):
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+        _fill(idx)
+        real_conn = idx._conn
+        try:
+            idx._conn = self._failing_read_conn(real_conn)
+            for by_size in (True, False):
+                with pytest.raises(RuntimeError) as excinfo:
+                    idx.candidate_stats(by_size=by_size)
+                message = str(excinfo.value)
+                assert "%TEMP%" in message, by_size
+                assert "disk I/O error" in message, by_size
+                assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
+    def test_iter_candidate_groups_query_error_is_reraised_with_actionable_message(self, tmp_path):
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+        _fill(idx)
+        real_conn = idx._conn
+        try:
+            idx._conn = self._failing_read_conn(real_conn)
+            for by_size in (True, False):
+                # The query runs on the first next(): the error must come out
+                # of the iteration, not out of the call.
+                with pytest.raises(RuntimeError) as excinfo:
+                    list(idx.iter_candidate_groups(by_size=by_size))
+                message = str(excinfo.value)
+                assert "%TEMP%" in message, by_size
+                assert "disk I/O error" in message, by_size
+                assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
+
 class TestStaleTempCleanup:
     def test_stale_spill_files_are_swept_only(self, tmp_path, monkeypatch, caplog):
         """L3: a killed process never reaches close(), so its spill DB stays

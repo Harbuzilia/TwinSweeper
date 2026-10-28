@@ -477,9 +477,15 @@ def scan_directory(
             return False
 
         def group_batch(batch: List[FileInfo]) -> None:
-            """Group one batch by key. With by_size the key contains the size
-            and a size group is never split across batches, so per-batch
-            grouping is identical to the old whole-list grouping."""
+            """Group one batch by key, MERGING into the groups already found.
+
+            With by_size the key contains the size and a size group is never
+            split across batches, so per-batch grouping is identical to the
+            old whole-list grouping. With by_size off the key is name/hash
+            only and the batch boundary can fall inside one key's members:
+            replacing the group would silently drop every member of the
+            earlier batches, hence the extend below.
+            """
             grouped = defaultdict(list)
             for info in batch:
                 if by_hash and info.hash is None:
@@ -497,7 +503,20 @@ def scan_directory(
                 grouped[key].append(info)
 
             for key, files in grouped.items():
-                if len(files) > 1:
+                existing = duplicates.get(key)
+                if existing is not None:
+                    # Rows are unique per path (the walk de-dups inodes and the
+                    # index stores one row per file), so extending cannot add
+                    # the same member twice. Appending keeps the discovery
+                    # order the whole-list grouping produced.
+                    existing.extend(files)
+                    continue
+                # by_size=True can never see the same key again (a size group
+                # is materialised whole), so a lone member is final there and
+                # is dropped right away — the memory ceiling keeps only real
+                # candidates. by_size=False has to carry it until the end:
+                # its twin may still arrive in a later batch.
+                if len(files) > 1 or not by_size:
                     duplicates[key] = files
 
         # Stream the candidate groups and hash them in bounded batches: peak
@@ -534,6 +553,11 @@ def scan_directory(
                 cancelled = hash_batch(batch)
             if not cancelled:
                 group_batch(batch)
+
+        # With by_size off a lone member was kept pending for a later batch to
+        # join; whatever stayed alone is not a duplicate. With by_size on the
+        # filter is a no-op (lone members were already dropped in group_batch).
+        duplicates = {key: files for key, files in duplicates.items() if len(files) > 1}
 
         if cancelled or is_cancelled():
             if executor is not None:

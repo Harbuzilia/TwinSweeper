@@ -28,7 +28,9 @@ persistent hash cache in ``db_cache`` which uses WAL. A process killed before
 ``close()`` leaves its file in %TEMP%; ``open_scan_index`` sweeps spill files
 older than ``STALE_SCAN_INDEX_AGE_SECONDS`` so they never pile up.
 """
+import functools
 import glob
+import inspect
 import os
 import sqlite3
 import tempfile
@@ -86,6 +88,44 @@ def _cleanup_stale_temp_files(max_age_seconds: int = STALE_SCAN_INDEX_AGE_SECOND
     return removed
 
 
+def _m1_guard(fn):
+    """M1: surface a failing spill QUERY as the actionable %TEMP% message.
+
+    ``_flush`` and ``finish`` guard the writes of the spill; the read side
+    (candidate stats and candidate iteration, both called by ``scan_directory``
+    mid-scan) needs the same guard, or a dead/sealed connection reaches the UI
+    as a bare 'disk I/O error' / 'Cannot operate on a closed database'.
+    The wrapper only translates the error: the message is the one the user can
+    act on, and the sqlite error stays chained (``__cause__``) for the log.
+
+    A generator function raises while it is being iterated, i.e. after the
+    wrapper already returned, so its generator is drained with ``yield from``
+    inside the guard.
+    """
+
+    def _fail(ex: sqlite3.Error) -> None:
+        logger.error("scan index query failed: %s", ex)
+        raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
+
+    if inspect.isgeneratorfunction(fn):
+        @functools.wraps(fn)
+        def gen_wrapper(*args, **kwargs):
+            try:
+                yield from fn(*args, **kwargs)
+            except sqlite3.Error as ex:
+                _fail(ex)
+        return gen_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.Error as ex:
+            _fail(ex)
+
+    return wrapper
+
+
 class ScanIndex:
     """Common contract of the discovery indexes (see module docstring)."""
 
@@ -111,7 +151,27 @@ class ScanIndex:
 
 
 class MemoryScanIndex(ScanIndex):
-    """Tuple-row in-RAM index — fallback when the SQLite spill is unavailable."""
+    """Tuple-row in-RAM index — fallback when the SQLite spill is unavailable.
+
+    Both buckets hold **lists**, not sets, and their order is load-bearing:
+
+    * ``_by_size[size]`` keeps a size group's rows in discovery (insert) order.
+      That order is part of the cross-backend contract:
+      ``SqliteScanIndex`` streams ``ORDER BY first_rowid, rowid`` — groups by
+      the first appearance of their size, rows in discovery order — so a scan
+      yields identical groups on either backend.
+    * ``_all`` holds every row in the same discovery order and backs the
+      ``by_size=False`` pool (one group of all rows, matching the spill's
+      ``ORDER BY rowid``).
+    * Set semantics would be wrong twice over: a set loses insertion order
+      (group order is visible in the results), and it silently collapses equal
+      rows, which would move ``candidate_stats`` counts and the progress
+      display built on them. The index does not need that safety net — rows
+      are unique per path because the walk de-dups inodes before ``add()``.
+    * The lists are owned by the index: ``iter_candidate_groups`` hands out the
+      live list of a size group (the ``by_size=False`` pool is copied), so a
+      caller must treat the yielded rows as read-only.
+    """
 
     def __init__(self) -> None:
         self._by_size: Dict[int, List[Row]] = {}
@@ -284,6 +344,7 @@ class SqliteScanIndex(ScanIndex):
             raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
         self.sealed = True
 
+    @_m1_guard
     def candidate_stats(self, by_size: bool = True) -> Tuple[int, int]:
         if not by_size:
             total = self._conn.execute("SELECT COUNT(*) FROM idx").fetchone()[0]
@@ -294,6 +355,7 @@ class SqliteScanIndex(ScanIndex):
         ).fetchone()
         return int(row[0]), int(row[1])
 
+    @_m1_guard
     def iter_candidate_groups(self, by_size: bool = True) -> Iterator[List[Row]]:
         if not by_size:
             total = self._conn.execute("SELECT COUNT(*) FROM idx").fetchone()[0]
