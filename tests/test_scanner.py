@@ -1433,3 +1433,59 @@ class TestMemoryCeiling:
         results = scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
         assert len(results) == 1
         assert len(next(iter(results.values()))) == 3
+
+
+class TestBatchGroupMerge:
+    """group_batch() must MERGE a key that arrives in more than one batch.
+
+    With ``by_size=False`` a batch boundary can fall inside one key's members,
+    so a plain ``duplicates[key] = files`` keeps only the last chunk. Today the
+    index streams the whole by_size=False pool as a single group, which hides
+    the overwrite; the fake index below streams the same pool in chunks — the
+    shape any batched/streamed index produces — and pins the merge contract.
+    """
+
+    class _ChunkedIndex:
+        """Discovery index stand-in that hands the candidate pool back in
+        fixed-size chunks (no hashing runs in this test: the rows are enough)."""
+
+        def __init__(self, chunk):
+            self.chunk = chunk
+            self.rows = []
+            self.closed = False
+
+        def add(self, path, name, size, created, modified):
+            self.rows.append((path, name, size, created, modified))
+
+        def finish(self):
+            pass
+
+        def candidate_stats(self, by_size=True):
+            return (1, len(self.rows)) if len(self.rows) > 1 else (0, 0)
+
+        def iter_candidate_groups(self, by_size=True):
+            for start in range(0, len(self.rows), self.chunk):
+                yield self.rows[start:start + self.chunk]
+
+        def close(self):
+            self.closed = True
+
+    def test_by_size_false_group_split_across_batches_keeps_every_member(self, tmp_path, monkeypatch):
+        # 150 files sharing one name but with different sizes: with by_size
+        # off the key is the name alone, so ALL 150 belong to one group.
+        for i in range(150):
+            d = tmp_path / f"d{i:03d}"
+            d.mkdir()
+            (d / "same_name.bin").write_bytes(bytes([65 + i % 26]) * (1000 + i))
+
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 40)
+        monkeypatch.setattr(scanner, "open_scan_index", lambda db_path=None: self._ChunkedIndex(40))
+
+        results = scan_directory(
+            [str(tmp_path)], by_name=True, by_size=False, by_hash=False, use_cache=False
+        )
+
+        assert len(results) == 1, "a single key must produce exactly one group"
+        (files,) = results.values()
+        assert len(files) == 150, "every chunk's members must survive the merge"
+        assert len({f.path for f in files}) == 150, "the merge must not duplicate a member"
