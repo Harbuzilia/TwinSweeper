@@ -28,6 +28,7 @@ import os
 import shutil
 import string
 import struct
+import uuid
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Sequence, Set, Tuple
 
@@ -243,6 +244,16 @@ def recycle_bin_dirs(roots: Sequence[str] | None = None) -> List[str]:
     return found
 
 
+def recycle_bin_available(recycle_dirs: Sequence[str] | None = None) -> bool:
+    """Whether any Recycle Bin folder can be scanned on this system.
+
+    ``False`` means the Restore action has no source at all — not Windows, or
+    every mounted volume without a bin — which the History tab states out loud
+    instead of silently offering nothing (``restore_unavailable``).
+    """
+    return bool(recycle_bin_dirs(recycle_dirs))
+
+
 def trash_key(path: str) -> str:
     """Normalised lookup key for an original path."""
     return os.path.normcase(os.path.normpath(os.path.abspath(path)))
@@ -288,7 +299,9 @@ def restore_entry(entry: TrashEntry, overwrite: bool = False) -> None:
         raise TrashPathConflict(target)
 
     parent = os.path.dirname(target)
-    temp_path = f"{target}.twinsweeper_restore_{os.getpid()}"
+    # Unique per attempt (pid alone collides between concurrent restores of the
+    # same path), and kept next to the target so ``os.replace`` stays atomic.
+    temp_path = f"{target}.twinsweeper_restore_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -334,11 +347,24 @@ def restore_paths(
 
     Returns ``(restored_count, errors)`` — the same shape as the other undo
     helpers, so the journal and the UI can treat them alike.
+
+    Retrying a partial restore is idempotent: a path that is no longer in the
+    bin *and* whose file sits at the original location counts as restored. The
+    bin entry was consumed by an earlier attempt (or the user put the file back
+    by hand), so there is nothing left to do and — crucially — nothing to
+    report: an error here would keep a finished operation "retryable" forever.
+    A path that is missing from the bin with no file at the target is still an
+    error, since the data really is gone.
     """
     index = build_index(recycle_dirs)
     restored = 0
     errors: List[str] = []
     for path in paths:
+        key = trash_key(path)
+        if key not in index and os.path.isfile(path):
+            # Already back in place: success without touching anything.
+            restored += 1
+            continue
         try:
             restore_file(path, recycle_dirs=recycle_dirs, overwrite=overwrite, index=index)
             restored += 1

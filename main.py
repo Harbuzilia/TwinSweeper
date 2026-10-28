@@ -970,6 +970,7 @@ def main(page: ft.Page):
         # every delete operation on screen; the Restore button is only offered
         # where the bin still holds the data (a permanent delete has nothing).
         restorable: set = set()
+        restore_unavailable = False
         if HAS_SEND2TRASH:
             candidates = [
                 p
@@ -980,8 +981,14 @@ def main(page: ft.Page):
             if candidates:
                 try:
                     restorable = trash_restore.restorable_paths(candidates)
+                    # Nothing restorable AND no bin to scan is a different story
+                    # from "the files are gone" — say so instead of showing no
+                    # button at all.
+                    if not restorable and not trash_restore.recycle_bin_available():
+                        restore_unavailable = True
                 except Exception as ex:
                     # A locked/foreign bin must not break the whole History tab.
+                    restore_unavailable = True
                     logger.warning("recycle bin scan failed: %s", ex)
 
         def undo_operation_action(op: dict):
@@ -1078,11 +1085,16 @@ def main(page: ft.Page):
             ))
         ops_section = ft.Container()
         if ops_items:
+            ops_controls = [
+                ft.Text(get_text("ops_log_title", current_language), size=13, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                ft.Column(ops_items, spacing=6),
+            ]
+            if restore_unavailable:
+                # L3: the key existed but nothing rendered it — a bin-less system
+                # showed the operations with no hint about why Restore is missing.
+                ops_controls.append(ft.Text(get_text("restore_unavailable", current_language), size=11, color=TEXT_MUTED))
             ops_section = get_styled_card(
-                ft.Column([
-                    ft.Text(get_text("ops_log_title", current_language), size=13, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                    ft.Column(ops_items, spacing=6),
-                ], spacing=8),
+                ft.Column(ops_controls, spacing=8),
                 padding=12
             )
 

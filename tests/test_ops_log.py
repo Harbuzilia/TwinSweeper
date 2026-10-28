@@ -326,6 +326,33 @@ class TestUndoDeleteFromTrash:
         assert present.read_bytes() == b"here"
         assert isolated_ops_log.load_operations()[0]["undone"] is False
 
+    def test_retry_after_partial_restore_finishes_cleanly(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        """M1: a retry must not blame the file the first attempt already restored.
+
+        The first attempt consumes the bin entry of ``first``; on retry that path
+        is gone from the bin but sits at its original location, which is success,
+        not an error — otherwise the operation could never be marked undone.
+        """
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        write_recycle_entry(fake_recycle_bin, first, b"first", suffix="FIRST.txt")
+        op = isolated_ops_log.log_delete_operation([str(first), str(second)], 20, use_trash=True)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+        assert restored == 1 and len(errors) == 1
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+        # The second file becomes recoverable later (transient failure earlier).
+        write_recycle_entry(fake_recycle_bin, second, b"second", suffix="SECOND.txt")
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 2
+        assert errors == []
+        assert first.read_bytes() == b"first"
+        assert second.read_bytes() == b"second"
+        assert isolated_ops_log.load_operations()[0]["undone"] is True
+
     def test_double_undo_refused(self, isolated_ops_log, fake_recycle_bin, tmp_path):
         _target, op = self._delete_op(isolated_ops_log, fake_recycle_bin, tmp_path)
         isolated_ops_log.undo_delete_operation(op["id"])

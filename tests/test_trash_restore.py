@@ -200,6 +200,34 @@ class TestBatchHelpers:
         assert str(missing) in errors[0]
         assert good.read_bytes() == b"ok"
 
+    def test_restore_paths_treats_file_already_in_place_as_success(self, fake_recycle_bin, tmp_path):
+        """Retry after a partial restore: a path whose bin entry is gone but whose
+        file sits at the original location is done, not an error."""
+        already = tmp_path / "already.txt"
+        already.write_bytes(b"back")
+        pending = tmp_path / "pending.txt"
+        write_recycle_entry(fake_recycle_bin, pending, b"still in bin")
+
+        restored, errors = trash_restore.restore_paths([str(already), str(pending)], recycle_dirs=[str(fake_recycle_bin)])
+
+        assert restored == 2
+        assert errors == []
+        assert already.read_bytes() == b"back"
+        assert pending.read_bytes() == b"still in bin"
+
+    def test_restore_paths_still_reports_missing_file_without_target(self, fake_recycle_bin, tmp_path):
+        gone = tmp_path / "gone.txt"
+
+        restored, errors = trash_restore.restore_paths([str(gone)], recycle_dirs=[str(fake_recycle_bin)])
+
+        assert restored == 0
+        assert len(errors) == 1
+        assert str(gone) in errors[0]
+
+    def test_recycle_bin_available_follows_the_probed_folders(self, fake_recycle_bin, tmp_path):
+        assert trash_restore.recycle_bin_available([str(fake_recycle_bin)]) is True
+        assert trash_restore.recycle_bin_available([str(tmp_path / "no_bin")]) is False
+
     def test_restorable_paths_lists_only_files_still_in_bin(self, fake_recycle_bin, tmp_path):
         present = tmp_path / "present.txt"
         absent = tmp_path / "absent.txt"
