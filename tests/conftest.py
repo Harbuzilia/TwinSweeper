@@ -84,6 +84,18 @@ def isolated_ops_log(tmp_path, monkeypatch):
     return ops_log
 
 
+# --- Fake Recycle Bin ------------------------------------------------------
+# trash_restore tests and the delete-undo tests both need a bin they can write
+# to: the real one is never touched by the suite. The helpers live in their own
+# module because tests/e2e ships a second conftest.py — importing shared names
+# from "conftest" would resolve to that one when the whole suite runs.
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+from trash_fixtures import fake_recycle_bin  # noqa: E402,F401  (pytest fixture)
+
+
 @pytest.fixture
 def dup_tree(tmp_path):
     """Deterministic duplicate-file tree:
