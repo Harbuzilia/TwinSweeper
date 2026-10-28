@@ -21,7 +21,7 @@ from phash_scanner import scan_similar_images
 from hardlink_manager import batch_replace_with_hardlinks, is_same_volume
 from sweeper import remove_emptied_parents
 from db_cache import cache_db
-from ops_log import load_operations, log_delete_operation, log_hardlink_operation, log_move_operation, undo_hardlink_operation, undo_move_operation, get_data_dir
+from ops_log import load_operations, log_delete_operation, log_hardlink_operation, log_move_operation, undo_hardlink_operation, undo_move_operation, undo_delete_operation, get_data_dir
 
 from ui.search_view import SearchView
 from ui.results_view import ResultsView
@@ -39,6 +39,7 @@ from ui.components import (
 from locales import get_text, set_current_language
 from app_logging import setup_logging, get_logger
 from app_info import APP_NAME, APP_TAGLINE, APP_VERSION
+import trash_restore
 
 logger = get_logger(__name__)
 
@@ -965,6 +966,24 @@ def main(page: ft.Page):
         operations = load_operations()
         ops_items = []
 
+        # Which files can still come back? One Recycle Bin scan answers that for
+        # every delete operation on screen; the Restore button is only offered
+        # where the bin still holds the data (a permanent delete has nothing).
+        restorable: set = set()
+        if HAS_SEND2TRASH:
+            candidates = [
+                p
+                for op in operations[:10]
+                if op.get("type") == "delete" and op.get("details", {}).get("trash") and not op.get("undone")
+                for p in op.get("paths", [])
+            ]
+            if candidates:
+                try:
+                    restorable = trash_restore.restorable_paths(candidates)
+                except Exception as ex:
+                    # A locked/foreign bin must not break the whole History tab.
+                    logger.warning("recycle bin scan failed: %s", ex)
+
         def undo_operation_action(op: dict):
             undo_fn = undo_move_operation if op.get("type") == "move" else undo_hardlink_operation
             op_id = op.get("id")
@@ -985,6 +1004,43 @@ def main(page: ft.Page):
                 on_nav_change(4)
 
             page.run_thread(_worker)
+
+        def restore_operation_action(op: dict):
+            op_id = op.get("id")
+
+            def _worker():
+                # Restoring copies whole files back from the bin: not on the UI thread.
+                restored, restore_errors = undo_delete_operation(op_id)
+                restore_msg = get_text("restore_done", current_language).format(restored)
+                if restore_errors:
+                    restore_msg += "\n\n" + get_text("dlg_errors_list") + ":\n" + "\n".join(restore_errors[:3])
+                restore_dlg = get_styled_dialog(
+                    title=get_text("restore_confirm_title", current_language),
+                    title_color=SUCCESS_COLOR if not restore_errors else WARNING_COLOR,
+                    content=ft.Text(restore_msg, size=13, color=TEXT_SECONDARY),
+                    actions=[get_primary_button(text=get_text("ok", current_language), on_click=lambda _: page.pop_dialog(), height=36)]
+                )
+                page.show_dialog(restore_dlg)
+                on_nav_change(4)
+
+            page.run_thread(_worker)
+
+        def confirm_restore_action(op: dict):
+            """Restore is a copy back to the user's folders — confirm it first."""
+            def _start(_):
+                page.pop_dialog()
+                restore_operation_action(op)
+
+            confirm_dlg = get_styled_dialog(
+                title=get_text("restore_confirm_title", current_language),
+                title_color=SUCCESS_COLOR,
+                content=ft.Text(get_text("restore_confirm_msg", current_language).format(len(op.get("paths", []))), size=13, color=TEXT_SECONDARY),
+                actions=[
+                    get_primary_button(text=get_text("op_restore", current_language), on_click=_start, height=36),
+                    get_outlined_button(text=get_text("cancel", current_language), on_click=lambda _: page.pop_dialog(), height=36),
+                ]
+            )
+            page.show_dialog(confirm_dlg)
 
         for op in operations[:10]:
             op_type = op.get("type")
@@ -1009,6 +1065,9 @@ def main(page: ft.Page):
             ]
             if op_type in ("hardlink", "move") and not op.get("undone"):
                 op_row_controls.append(get_action_icon_button(icon=ft.Icons.UNDO_ROUNDED, icon_color=WARNING_COLOR, tooltip=get_text("op_undo", current_language), on_click=lambda _, o=op: undo_operation_action(o), button_size=34, icon_size=18))
+            elif op_type == "delete" and not op.get("undone") and any(p in restorable for p in op.get("paths", [])):
+                # Only offered while the bin still holds the data (checked above).
+                op_row_controls.append(get_action_icon_button(icon=ft.Icons.RESTORE_ROUNDED, icon_color=SUCCESS_COLOR, tooltip=get_text("op_restore", current_language), on_click=lambda _, o=op: confirm_restore_action(o), button_size=34, icon_size=18))
             elif op.get("undone"):
                 op_row_controls.append(get_badge(get_text("op_undone", current_language), color=TEXT_MUTED))
             ops_items.append(ft.Container(
