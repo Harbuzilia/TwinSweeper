@@ -1297,6 +1297,26 @@ class TestMemoryCeiling:
         assert len(results) == 2
         assert sorted(len(g) for g in results.values()) == [2, 3]
 
+    def test_oversized_size_group_logs_and_stays_intact(self, tmp_path, monkeypatch, caplog):
+        """L4: the batch target bounds RAM; it never splits a size group. A
+        group bigger than the target is hashed as one oversized batch (so its
+        same-content members stay together) and the overshoot is logged
+        instead of silently doubling the intended peak."""
+        import logging
+
+        for i in range(5):
+            d = tmp_path / f"g{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"G" * 90)
+
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        with caplog.at_level(logging.WARNING, logger="scanner"):
+            results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+
+        assert len(results) == 1
+        assert len(next(iter(results.values()))) == 5
+        assert any("exceeds batch size" in r.message for r in caplog.records)
+
     def test_unique_size_files_never_materialized_as_fileinfo(self, dup_tree, monkeypatch):
         created = []
 
@@ -1360,6 +1380,46 @@ class TestMemoryCeiling:
         assert any(m.startswith(get_text("scan_hashed").format(10, 10)) for m in msgs)
         assert pcts[-1] == 1.0
         assert pcts == sorted(pcts)
+
+    def test_spill_write_failure_reaches_caller_as_actionable_error(self, dup_tree, monkeypatch):
+        """M1: a dead spill write mid-walk aborts scan_directory with a
+        RuntimeError that names %TEMP% (main.py renders the message of the
+        exception verbatim), instead of a bare 'database is locked'."""
+        import sqlite3
+
+        import scan_index as scan_index_module
+
+        opened = []
+        real_open = scan_index_module.open_scan_index
+
+        def failing_open():
+            idx = real_open()
+            real_conn = idx._conn
+
+            class FailingConn:
+                """Write-failing stand-in for the sqlite connection. close()
+                must still release the real connection, or Windows keeps the
+                spill file locked and close() cannot remove it."""
+
+                def executemany(self, *args, **kwargs):
+                    raise sqlite3.OperationalError("database is locked")
+
+                def commit(self):
+                    pass
+
+                def close(self):
+                    real_conn.close()
+
+            idx._conn = FailingConn()
+            opened.append(idx)
+            return idx
+
+        monkeypatch.setattr(scanner, "open_scan_index", failing_open)
+        monkeypatch.setattr(scan_index_module, "INSERT_BATCH_ROWS", 1)
+        with pytest.raises(RuntimeError, match="%TEMP%"):
+            scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        # the spill stays scan-scoped state even on the error path
+        assert opened and opened[-1].closed
 
     def test_fallback_to_memory_index_scans_correctly(self, dup_tree, monkeypatch):
         import sqlite3

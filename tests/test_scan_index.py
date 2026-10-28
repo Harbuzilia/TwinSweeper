@@ -90,6 +90,20 @@ class TestIndexContract:
         assert index.candidate_stats(by_size=True) == (0, 0)
         assert list(index.iter_candidate_groups(by_size=True)) == []
 
+    def test_groups_follow_size_first_appearance_order(self, index):
+        """L1/L2: both backends agree — groups stream in the order their size
+        first appeared in the walk, NOT in ascending size order. Rows inside a
+        group stay in discovery order."""
+        b1 = (r"C:\d\b1.bin", "b1.bin", 500, 1.0, 1.0)
+        a1 = (r"C:\d\a1.bin", "a1.bin", 100, 2.0, 2.0)
+        b2 = (r"C:\d\b2.bin", "b2.bin", 500, 3.0, 3.0)
+        a2 = (r"C:\d\a2.bin", "a2.bin", 100, 4.0, 4.0)
+        _fill(index, [b1, a1, b2, a2])
+        groups = list(index.iter_candidate_groups(by_size=True))
+        # size 500 was seen first (B, A, B, A) — it must come out first even
+        # though 100 < 500.
+        assert groups == [[b1, b2], [a1, a2]]
+
     def test_iteration_is_repeatable(self, index):
         _fill(index)
         first = list(index.iter_candidate_groups(by_size=True))
@@ -97,13 +111,47 @@ class TestIndexContract:
         assert first == second
 
 
+class TestMemoryIndexStats:
+    def test_stats_allocate_no_per_group_list(self):
+        """L5: candidate_stats must not build an intermediate list of the
+        duplicate groups (O(#groups) pointers on top of the index). The spill
+        backend answers from SQLite; the fallback must not be the hog of the
+        pair on a tree made of many small pairs."""
+        import tracemalloc
+
+        idx = MemoryScanIndex()
+        try:
+            for size in range(20_000):
+                idx.add(f"p{size}", f"n{size}", size, 0.0, 0.0)
+                idx.add(f"q{size}", f"q{size}", size, 0.0, 0.0)
+
+            started_here = not tracemalloc.is_tracing()
+            if started_here:
+                tracemalloc.start()
+            baseline = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            stats = idx.candidate_stats(by_size=True)
+            peak = tracemalloc.get_traced_memory()[1]
+            if started_here:
+                tracemalloc.stop()
+        finally:
+            idx.close()
+
+        assert stats == (20_000, 40_000)
+        # A list of 20k group references alone is ~160 KB; two counters need
+        # none of it.
+        assert peak - baseline < 64 * 1024
+
+
 class TestSqliteSpill:
     def test_spill_needs_no_sqlite_temp_files(self, tmp_path):
         """ORDER BY / CREATE INDEX must not spill to SQLite's own temp dir:
         a locked-down or full %TEMP% used to abort mid-iteration with
         'unable to open database file' (caught by the 50k benchmark).
-        temp_store=MEMORY + a size index (finish()) keep the streaming
-        query on the index order — no sorter, no temp files."""
+        temp_store=MEMORY + the idx_first index (finish()) keep the streaming
+        query on the index order — no sorter, no temp files. A sorter would
+        also mean RAM proportional to the candidates, which is what the 2.2f
+        memory ceiling exists to avoid."""
         idx = SqliteScanIndex(str(tmp_path / "idx.db"))
         try:
             mode = idx._conn.execute("PRAGMA temp_store").fetchone()[0]
@@ -111,12 +159,20 @@ class TestSqliteSpill:
             for i in range(10):
                 idx.add(f"p{i}", f"p{i}", 100, float(i), float(i))
             idx.finish()
+            plan = [
+                r[3] for r in idx._conn.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT size, path, name, created, modified FROM idx "
+                    "WHERE first_rowid IS NOT NULL ORDER BY first_rowid, rowid"
+                )
+            ]
+            assert not any("TEMP B-TREE" in step for step in plan), plan
             names = [
                 r[0] for r in idx._conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='idx'"
                 )
             ]
-            assert names, "finish() must create the size index that serves ORDER BY size, rowid"
+            assert names, "finish() must create the indexes iteration reads (idx_size, idx_first)"
             (group,) = list(idx.iter_candidate_groups(by_size=True))
             assert len(group) == 10
         finally:
@@ -157,6 +213,117 @@ class TestSqliteSpill:
         idx.close()
         assert os.path.exists(str(p))
 
+    def test_flush_error_is_reraised_with_actionable_message(self, monkeypatch, tmp_path):
+        """M1: a spill write failure mid-walk must not reach the UI as a bare
+        'database is locked' — the scan aborts with a message that names the
+        temp location, and the original sqlite error stays chained."""
+        monkeypatch.setattr(scan_index, "INSERT_BATCH_ROWS", 1)
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingConn:
+            def executemany(self, *args, **kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        real_conn = idx._conn
+        idx._conn = FailingConn()
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                idx.add("p", "p", 1, 0.0, 0.0)
+        finally:
+            idx._conn = real_conn
+            idx.close()
+        message = str(excinfo.value)
+        assert "%TEMP%" in message
+        assert "database is locked" in message
+        assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+
+    def test_finish_flush_error_is_reraised_with_actionable_message(self, monkeypatch, tmp_path):
+        """The batch still buffered when the walk ends hits the same guard
+        through finish(), not only through a mid-walk add()."""
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingConn:
+            def executemany(self, *args, **kwargs):
+                raise sqlite3.OperationalError("disk I/O error")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        real_conn = idx._conn
+        idx._conn = FailingConn()
+        idx.add("p", "p", 1, 0.0, 0.0)  # stays buffered (batch = 5000 rows)
+        try:
+            with pytest.raises(RuntimeError, match="%TEMP%"):
+                idx.finish()
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
+    def test_finish_seal_error_is_reraised_and_retryable(self, tmp_path):
+        """The seal (both index builds, first_rowid assignment) is the heaviest
+        write in the spill, so a failure there needs the same M1 message as a
+        flush failure — and must not mark the index sealed: `sealed` is set
+        only after the seal commit, so a repeated finish() retries instead of
+        leaving a half-sealed table that iteration cannot read."""
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingSealConn:
+            """Delegates to the real connection until the seal's last index
+            build: the flush and every earlier seal step succeed, so the
+            failure can only come from the seal itself."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *args, **kwargs):
+                if "CREATE INDEX IF NOT EXISTS idx_first" in sql:
+                    raise sqlite3.OperationalError("database or disk is full")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def executemany(self, sql, rows, *args, **kwargs):
+                return self._real.executemany(sql, rows, *args, **kwargs)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def close(self):
+                pass
+
+        idx.add("p", "p", 1, 0.0, 0.0)
+        idx.add("q", "q", 1, 0.0, 0.0)
+        idx._flush()  # buffer drained: a failure now can only be the seal
+        real_conn = idx._conn
+        try:
+            idx._conn = FailingSealConn(real_conn)
+            with pytest.raises(RuntimeError) as excinfo:
+                idx.finish()
+            message = str(excinfo.value)
+            assert "%TEMP%" in message
+            assert "database or disk is full" in message
+            assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+            assert idx.sealed is False, "a failed seal must leave the index open for a retry"
+            idx._conn = real_conn
+            idx.finish()  # retry on a healthy connection: the seal is idempotent
+            assert idx.sealed is True
+            assert list(idx.iter_candidate_groups(by_size=True)) == [
+                [("p", "p", 1, 0.0, 0.0), ("q", "q", 1, 0.0, 0.0)]
+            ]
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
     def test_failed_connect_cleans_own_temp_file(self, monkeypatch):
         import os
         captured = {}
@@ -172,6 +339,46 @@ class TestSqliteSpill:
         assert "path" in captured
         assert not os.path.exists(captured["path"])
         monkeypatch.setattr(scan_index.sqlite3, "connect", real_connect)
+
+
+class TestStaleTempCleanup:
+    def test_stale_spill_files_are_swept_only(self, tmp_path, monkeypatch, caplog):
+        """L3: a killed process never reaches close(), so its spill DB stays
+        in %TEMP%. The next open_scan_index() sweeps files older than the
+        documented age, leaves fresh ones (a live scan) and anything that is
+        not ours alone."""
+        import logging
+        import os
+        import time
+
+        old = time.time() - (scan_index.STALE_SCAN_INDEX_AGE_SECONDS + 60)
+        stale = tmp_path / "twinsweeper_scanidx_stale.db"
+        stale.write_bytes(b"x")
+        os.utime(str(stale), (old, old))
+        fresh = tmp_path / "twinsweeper_scanidx_fresh.db"
+        fresh.write_bytes(b"x")
+        foreign = tmp_path / "someone_elses.db"
+        foreign.write_bytes(b"x")
+        os.utime(str(foreign), (old, old))
+
+        monkeypatch.setattr(scan_index.tempfile, "gettempdir", lambda: str(tmp_path))
+        with caplog.at_level(logging.WARNING):
+            idx = open_scan_index(str(tmp_path / "own.db"))
+        idx.close()
+
+        assert not stale.exists(), "an abandoned spill file must be removed"
+        assert fresh.exists(), "another live scan's index must survive"
+        assert foreign.exists(), "only twinsweeper_scanidx_*.db files are ours"
+        assert any("stale scan index" in r.message for r in caplog.records)
+
+    def test_cleanup_survives_a_broken_temp_dir(self, monkeypatch):
+        """Cleanup is best effort: an unreadable %TEMP% must not break a scan
+        that otherwise works (the spill itself reports its own failure)."""
+        def boom(*args, **kwargs):
+            raise OSError("no temp dir")
+
+        monkeypatch.setattr(scan_index.tempfile, "gettempdir", boom)
+        assert scan_index._cleanup_stale_temp_files() == 0
 
 
 class TestOpenScanIndexFallback:

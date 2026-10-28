@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
+from app_logging import get_logger
 from db_cache import cache_db
 from fs_filters import (
     InodeDeduper,
@@ -22,6 +23,8 @@ try:
     HAS_XXHASH = True
 except ImportError:
     HAS_XXHASH = False
+
+logger = get_logger(__name__)
 
 FILE_CATEGORIES = {
     "images": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".tiff", ".heic", ".raw"},
@@ -505,6 +508,19 @@ def scan_directory(
             if is_cancelled():
                 cancelled = True
                 break
+            # L4: CANDIDATE_BATCH_FILES is a RAM target, not a hard ceiling —
+            # a size group is materialised and hashed whole, or same-content
+            # members would land in different batches and the group would
+            # shatter. A group bigger than the target therefore overshoots it
+            # (the batch was below the target before the extend, so the group
+            # alone decides); log the overshoot instead of letting the memory
+            # peak silently double.
+            if by_size and len(rows) > CANDIDATE_BATCH_FILES:
+                logger.warning(
+                    "size group of %d files exceeds batch size %d; hashing it as one oversized batch (the group is never split)",
+                    len(rows),
+                    CANDIDATE_BATCH_FILES,
+                )
             batch.extend(FileInfo(path=p, name=n, size=s, created=c, modified=m) for p, n, s, c, m in rows)
             if len(batch) >= CANDIDATE_BATCH_FILES:
                 if by_hash:

@@ -11,10 +11,11 @@ size are ever needed again. This module keeps the discovery rows
   walk's RAM stays O(batch) regardless of tree size;
 * ``MemoryScanIndex`` is the tuple-row fallback when SQLite is unavailable —
   still ~4x lighter per file than a full ``FileInfo``;
-* both stream whole size-groups lazily (``iter_candidate_groups``) in
-  discovery order (``ORDER BY size, rowid`` == the old ``defaultdict``
-  insertion order), so ``FileInfo`` objects are constructed only for
-  candidate files, group by group.
+* both stream whole size-groups lazily (``iter_candidate_groups``) in the
+  old ``defaultdict`` order: groups by the first appearance of their size in
+  the walk, rows inside a group in discovery order. ``FileInfo`` objects are
+  built only for candidate files, group by group, and the backend in use
+  never changes the order of the scan's results.
 
 Rows are plain tuples ``(path, name, size, created, modified)`` — the exact
 constructor fields of ``scanner.FileInfo``. ``FileInfo`` is deliberately NOT
@@ -23,14 +24,19 @@ circular import and of any per-row object overhead.
 
 The spill DB is transient scan state (a crash simply means "rescan"), hence
 ``journal_mode=MEMORY``/``synchronous=OFF`` for insert speed — unlike the
-persistent hash cache in ``db_cache`` which uses WAL.
+persistent hash cache in ``db_cache`` which uses WAL. A process killed before
+``close()`` leaves its file in %TEMP%; ``open_scan_index`` sweeps spill files
+older than ``STALE_SCAN_INDEX_AGE_SECONDS`` so they never pile up.
 """
+import glob
 import os
 import sqlite3
 import tempfile
+import time
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from app_logging import get_logger
+from locales import get_text
 
 logger = get_logger(__name__)
 
@@ -39,6 +45,45 @@ Row = Tuple[str, str, int, float, float]
 
 # Rows buffered in RAM before one executemany flush into the spill DB.
 INSERT_BATCH_ROWS = 5000
+
+# Name of the throwaway spill DBs in %TEMP% (prefix of the mkstemp name).
+_TEMP_DB_GLOB = "twinsweeper_scanidx_*.db"
+
+# A spill DB is removed by close(); a process killed without unwinding leaves
+# it behind. Only files older than this are swept: a live scan keeps rewriting
+# its index, so its mtime stays fresh, and even a multi-hour scan on a slow
+# disk never looks abandoned. 24h keeps a parallel run of the app (or a pause
+# in a debugger overnight) safe.
+STALE_SCAN_INDEX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _cleanup_stale_temp_files(max_age_seconds: int = STALE_SCAN_INDEX_AGE_SECONDS) -> int:
+    """Delete spill DBs left in %TEMP% by a process that never reached close().
+
+    Best effort: the files are transient scan artifacts, never user data, so
+    any filesystem error simply leaves one alone. Returns the number removed.
+    """
+    removed = 0
+    now = time.time()
+    try:
+        candidates = glob.glob(os.path.join(tempfile.gettempdir(), _TEMP_DB_GLOB))
+    except (OSError, ValueError):
+        return 0
+    for path in candidates:
+        try:
+            age_seconds = now - os.path.getmtime(path)
+            if age_seconds <= max_age_seconds:
+                continue
+            os.remove(path)
+        except OSError:
+            continue
+        removed += 1
+        logger.warning(
+            "removed stale scan index %s (%.0f h old, left by an interrupted scan)",
+            path,
+            age_seconds / 3600,
+        )
+    return removed
 
 
 class ScanIndex:
@@ -85,8 +130,17 @@ class MemoryScanIndex(ScanIndex):
         if not by_size:
             total = len(self._all)
             return (1, total) if total > 1 else (0, 0)
-        dup = [rows for rows in self._by_size.values() if len(rows) > 1]
-        return len(dup), sum(len(rows) for rows in dup)
+        # L5: one pass over the size buckets into two counters — the old list
+        # comprehension of duplicate groups cost O(#groups) pointers on every
+        # call, the one allocation this index cannot afford to make worse than
+        # the SQLite spill it stands in for.
+        groups = 0
+        files = 0
+        for rows in self._by_size.values():
+            if len(rows) > 1:
+                groups += 1
+                files += len(rows)
+        return groups, files
 
     def iter_candidate_groups(self, by_size: bool = True) -> Iterator[List[Row]]:
         if not by_size:
@@ -96,6 +150,8 @@ class MemoryScanIndex(ScanIndex):
                 yield list(self._all)
             return
         for rows in self._by_size.values():
+            # dict insertion order == the size's first appearance in the walk,
+            # which is exactly what SqliteScanIndex streams back too.
             if len(rows) > 1:
                 yield rows
 
@@ -107,10 +163,11 @@ class MemoryScanIndex(ScanIndex):
 
 class SqliteScanIndex(ScanIndex):
     """Spill-to-disk discovery index: rows live in a throwaway SQLite DB, and
-    candidate groups are streamed back through a lazy cursor."""
+    candidate groups are streamed back lazily, one ordered index scan."""
 
     def __init__(self, db_path: Optional[str] = None) -> None:
         self.closed = False
+        self.sealed = False
         self._owns_file = db_path is None
         self._buffer: List[Row] = []
         if db_path is None:
@@ -159,18 +216,73 @@ class SqliteScanIndex(ScanIndex):
         if not self._buffer:
             return
         # Parameterised executemany — never string-built SQL.
-        self._conn.executemany("INSERT INTO idx (path, name, size, created, modified) VALUES (?, ?, ?, ?, ?)", self._buffer)
-        self._conn.commit()
+        try:
+            self._conn.executemany("INSERT INTO idx (path, name, size, created, modified) VALUES (?, ?, ?, ?, ?)", self._buffer)
+            self._conn.commit()
+        except sqlite3.Error as ex:
+            # A dead spill write (disk full, permissions, locked file) must not
+            # abort the scan with a bare 'database is locked' (M1): name the
+            # temp location so the user can act on it. main.py renders the
+            # exception message verbatim; the sqlite error stays chained for
+            # logging/debugging.
+            logger.error("scan index spill write failed: %s", ex)
+            raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
         self._buffer.clear()
 
     def finish(self) -> None:
         self._flush()
-        # Serves the streaming query's ORDER BY size, rowid as an index scan
-        # (index entries are rowid-ordered within each size) — no sorter and
-        # no temp files at iteration time. Built once, after the bulk load:
-        # inserting into an unindexed table first is several times faster.
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
-        self._conn.commit()
+        if self.sealed:
+            return
+        # The seal is the heaviest write of the spill (two index builds, a
+        # full-table UPDATE, a table rewrite), so it gets the same M1 guard as
+        # _flush(): a dead write must reach the user as the actionable message
+        # naming %TEMP%, not as a bare 'database or disk is full'. `sealed` is
+        # set only after the seal commits: on failure the partial transaction
+        # is rolled back and the index stays unsealed, so a repeated finish()
+        # retries the seal (each step is idempotent) instead of leaving a
+        # half-sealed table that iteration cannot read ('no such column:
+        # first_rowid').
+        # Sealing turns discovery order into an index order, once, after the
+        # bulk load (inserting into an unindexed table first is several times
+        # faster):
+        #  * idx_size  — GROUP BY size / MIN(rowid) below (and candidate_stats);
+        #  * dup       — one row per duplicate size: the rowid of its first
+        #                occurrence, i.e. the group's place in the walk;
+        #  * first_rowid — that place copied onto every candidate row, NULL for
+        #                unique-size rows (never streamed);
+        #  * idx_first — the streaming scan's order: `first_rowid, rowid` is
+        #                exactly "groups by first appearance of their size, rows
+        #                in discovery order", served by the index with no sorter
+        #                and no temp files (2.2f memory ceiling).
+        try:
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_size ON idx(size)")
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS dup (size INTEGER PRIMARY KEY, first_rowid INTEGER NOT NULL)"
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO dup (size, first_rowid) "
+                "SELECT size, MIN(rowid) FROM idx GROUP BY size HAVING COUNT(*) > 1"
+            )
+            # ADD COLUMN is the one non-repeatable step: a retry after a partial
+            # seal (DDL autocommitted before the failure) must not die on
+            # 'duplicate column name'.
+            columns = {row[1] for row in self._conn.execute("PRAGMA table_info(idx)")}
+            if "first_rowid" not in columns:
+                self._conn.execute("ALTER TABLE idx ADD COLUMN first_rowid INTEGER")
+            self._conn.execute(
+                "UPDATE idx SET first_rowid = (SELECT first_rowid FROM dup WHERE dup.size = idx.size)"
+            )
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_first ON idx(first_rowid)")
+            self._conn.execute("DROP TABLE IF EXISTS dup")
+            self._conn.commit()
+        except sqlite3.Error as ex:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            logger.error("scan index seal failed: %s", ex)
+            raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
+        self.sealed = True
 
     def candidate_stats(self, by_size: bool = True) -> Tuple[int, int]:
         if not by_size:
@@ -190,12 +302,14 @@ class SqliteScanIndex(ScanIndex):
             cur = self._conn.execute("SELECT path, name, size, created, modified FROM idx ORDER BY rowid")
             yield [tuple(r) for r in cur]
             return
-        # rowid == insert order, so rows within a size group keep discovery
-        # order exactly like the old defaultdict(list) index did.
+        # L1/L2: `first_rowid, rowid` is the size-discovery order of the old
+        # defaultdict(list) index — groups by the first appearance of their
+        # size, rows in discovery order — and it is an index scan, not a
+        # sorter, so the ordering costs no RAM and no temp files. Consecutive
+        # rows always share a size, so a size change marks a group boundary.
         cur = self._conn.execute(
             "SELECT size, path, name, created, modified FROM idx "
-            "WHERE size IN (SELECT size FROM idx GROUP BY size HAVING COUNT(*) > 1) "
-            "ORDER BY size, rowid"
+            "WHERE first_rowid IS NOT NULL ORDER BY first_rowid, rowid"
         )
         group: List[Row] = []
         current_size = None
@@ -224,6 +338,7 @@ class SqliteScanIndex(ScanIndex):
 def open_scan_index(db_path: Optional[str] = None) -> ScanIndex:
     """SQLite spill when possible, in-RAM tuple rows when not: an unwritable
     temp location must never break a scan that worked before 2.2f."""
+    _cleanup_stale_temp_files()
     try:
         return SqliteScanIndex(db_path)
     except (sqlite3.Error, OSError) as ex:
