@@ -1297,6 +1297,26 @@ class TestMemoryCeiling:
         assert len(results) == 2
         assert sorted(len(g) for g in results.values()) == [2, 3]
 
+    def test_oversized_size_group_logs_and_stays_intact(self, tmp_path, monkeypatch, caplog):
+        """L4: the batch target bounds RAM; it never splits a size group. A
+        group bigger than the target is hashed as one oversized batch (so its
+        same-content members stay together) and the overshoot is logged
+        instead of silently doubling the intended peak."""
+        import logging
+
+        for i in range(5):
+            d = tmp_path / f"g{i}"
+            d.mkdir()
+            (d / "same.bin").write_bytes(b"G" * 90)
+
+        monkeypatch.setattr(scanner, "CANDIDATE_BATCH_FILES", 2)
+        with caplog.at_level(logging.WARNING, logger="scanner"):
+            results = scan_directory([str(tmp_path)], by_hash=True, use_cache=False, futures_window=1)
+
+        assert len(results) == 1
+        assert len(next(iter(results.values()))) == 5
+        assert any("exceeds batch size" in r.message for r in caplog.records)
+
     def test_unique_size_files_never_materialized_as_fileinfo(self, dup_tree, monkeypatch):
         created = []
 
