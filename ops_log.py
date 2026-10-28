@@ -6,8 +6,10 @@ import time
 import uuid
 from typing import List, Optional, Tuple
 
+import trash_restore
 from db_cache import get_data_dir
 from app_logging import get_logger
+from locales import get_text
 
 logger = get_logger(__name__)
 
@@ -192,4 +194,48 @@ def undo_hardlink_operation(op_id: str) -> Tuple[int, List[str]]:
         if fresh is not None and not errors:
             fresh["undone"] = True
             _save_unlocked(ops)
+    return restored, errors
+
+
+def undo_delete_operation(op_id: str) -> Tuple[int, List[str]]:
+    """Restores the files of a 'delete' operation from the Recycle Bin.
+
+    Only operations journaled with ``trash=True`` can come back: a permanent
+    delete left nothing to restore, and saying so is better than a silent
+    "0 restored". The files are restored before the journal is touched, so a
+    single unrecoverable file keeps the whole operation retryable (same
+    discipline as the hardlink/move undos).
+    """
+    with _lock:
+        ops = _load_unlocked()
+        op = next((o for o in ops if o.get("id") == op_id), None)
+        if not op or op.get("type") != "delete" or op.get("undone"):
+            return 0, [get_text("op_not_found_or_undone")]
+        if not op.get("details", {}).get("trash"):
+            # H5-adjacent: the delete path never falls back to a permanent
+            # delete, so a trash=False operation really is unrecoverable.
+            return 0, [get_text("restore_permanent_delete")]
+        paths = [p for p in op.get("paths", []) if p]
+        if not paths:
+            return 0, []
+
+    # The Recycle Bin scan and the copies are disk work — outside the lock,
+    # like the other undo helpers.
+    restored, errors = trash_restore.restore_paths(paths)
+
+    with _lock:
+        ops = _load_unlocked()
+        fresh = next((o for o in ops if o.get("id") == op_id), None)
+        if fresh is not None:
+            # Journal the outcome of every attempt: a partial restore the user
+            # retries later must leave a trace of what happened before.
+            fresh.setdefault("details", {})["restore_result"] = {
+                "restored": restored,
+                "errors": errors[:5],
+                "ts": time.time(),
+            }
+            if not errors:
+                fresh["undone"] = True
+            _save_unlocked(ops)
+    logger.info("delete undo %s: restored=%s errors=%s", op_id, restored, len(errors))
     return restored, errors

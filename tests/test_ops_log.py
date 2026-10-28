@@ -6,6 +6,8 @@ import threading
 import pytest
 
 from hardlink_manager import replace_with_hardlink
+from trash_fixtures import write_recycle_entry
+from locales import get_text
 
 
 class TestAppendAndLoad:
@@ -247,3 +249,123 @@ class TestUndoRetryableOnPartialFailure:
         assert isolated_ops_log.load_operations()[0]["undone"] is True
         # The duplicate is an independent copy again.
         assert not os.path.samefile(str(original), str(duplicate))
+
+
+class TestUndoDeleteFromTrash:
+    """A deletion that went to the Recycle Bin is recoverable through the
+    journal's trash flag; an operation deleted permanently is not, and the
+    bin entry is never consumed by a restore that did not complete."""
+
+    @pytest.fixture(autouse=True)
+    def fake_bin_as_default(self, fake_recycle_bin, monkeypatch):
+        """Makes trash_restore look at the fake bin instead of the real one."""
+        import trash_restore
+
+        monkeypatch.setattr(trash_restore, "recycle_bin_dirs", lambda roots=None: [str(fake_recycle_bin)])
+        return fake_recycle_bin
+
+    def _delete_op(self, ops_log, fake_recycle_bin, tmp_path, *, trash=True, name="victim.txt", content=b"payload"):
+        target = tmp_path / "restore_target" / name
+        write_recycle_entry(fake_recycle_bin, target, content)
+        return target, ops_log.log_delete_operation([str(target)], len(content), use_trash=trash)
+
+    def test_trash_delete_is_restored_and_marked_undone(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        target, op = self._delete_op(isolated_ops_log, fake_recycle_bin, tmp_path)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 1
+        assert errors == []
+        assert target.read_bytes() == b"payload"
+        assert isolated_ops_log.load_operations()[0]["undone"] is True
+
+    def test_permanent_delete_reports_it_cannot_be_restored(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        target, op = self._delete_op(isolated_ops_log, fake_recycle_bin, tmp_path, trash=False)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 0
+        assert len(errors) == 1
+        assert get_text("restore_permanent_delete") in errors[0]
+        assert not target.exists()
+        # Nothing was restored, so the retry path stays open.
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+    def test_file_no_longer_in_bin_reports_error_and_stays_retryable(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        target = tmp_path / "gone.txt"
+        op = isolated_ops_log.log_delete_operation([str(target)], 10, use_trash=True)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 0
+        assert errors and str(target) in errors[0]
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+    def test_existing_target_is_reported_as_conflict(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        target, op = self._delete_op(isolated_ops_log, fake_recycle_bin, tmp_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"newer user file")
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 0
+        assert errors and str(target) in errors[0]
+        assert target.read_bytes() == b"newer user file"
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+    def test_partial_restore_counts_successes_and_stays_retryable(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        present = tmp_path / "present.txt"
+        absent = tmp_path / "absent.txt"
+        write_recycle_entry(fake_recycle_bin, present, b"here", suffix="PRESENT.txt")
+        op = isolated_ops_log.log_delete_operation([str(present), str(absent)], 20, use_trash=True)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 1
+        assert len(errors) == 1
+        assert present.read_bytes() == b"here"
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+    def test_retry_after_partial_restore_finishes_cleanly(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        """M1: a retry must not blame the file the first attempt already restored.
+
+        The first attempt consumes the bin entry of ``first``; on retry that path
+        is gone from the bin but sits at its original location, which is success,
+        not an error — otherwise the operation could never be marked undone.
+        """
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        write_recycle_entry(fake_recycle_bin, first, b"first", suffix="FIRST.txt")
+        op = isolated_ops_log.log_delete_operation([str(first), str(second)], 20, use_trash=True)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+        assert restored == 1 and len(errors) == 1
+        assert isolated_ops_log.load_operations()[0]["undone"] is False
+
+        # The second file becomes recoverable later (transient failure earlier).
+        write_recycle_entry(fake_recycle_bin, second, b"second", suffix="SECOND.txt")
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 2
+        assert errors == []
+        assert first.read_bytes() == b"first"
+        assert second.read_bytes() == b"second"
+        assert isolated_ops_log.load_operations()[0]["undone"] is True
+
+    def test_double_undo_refused(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        _target, op = self._delete_op(isolated_ops_log, fake_recycle_bin, tmp_path)
+        isolated_ops_log.undo_delete_operation(op["id"])
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 0
+        assert errors
+
+    def test_undo_delete_refuses_other_operation_types(self, isolated_ops_log, fake_recycle_bin, tmp_path):
+        op = isolated_ops_log.log_hardlink_operation([(str(tmp_path / "a"), str(tmp_path / "b"))], 1)
+
+        restored, errors = isolated_ops_log.undo_delete_operation(op["id"])
+
+        assert restored == 0
+        assert errors
