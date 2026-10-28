@@ -1361,6 +1361,46 @@ class TestMemoryCeiling:
         assert pcts[-1] == 1.0
         assert pcts == sorted(pcts)
 
+    def test_spill_write_failure_reaches_caller_as_actionable_error(self, dup_tree, monkeypatch):
+        """M1: a dead spill write mid-walk aborts scan_directory with a
+        RuntimeError that names %TEMP% (main.py renders the message of the
+        exception verbatim), instead of a bare 'database is locked'."""
+        import sqlite3
+
+        import scan_index as scan_index_module
+
+        opened = []
+        real_open = scan_index_module.open_scan_index
+
+        def failing_open():
+            idx = real_open()
+            real_conn = idx._conn
+
+            class FailingConn:
+                """Write-failing stand-in for the sqlite connection. close()
+                must still release the real connection, or Windows keeps the
+                spill file locked and close() cannot remove it."""
+
+                def executemany(self, *args, **kwargs):
+                    raise sqlite3.OperationalError("database is locked")
+
+                def commit(self):
+                    pass
+
+                def close(self):
+                    real_conn.close()
+
+            idx._conn = FailingConn()
+            opened.append(idx)
+            return idx
+
+        monkeypatch.setattr(scanner, "open_scan_index", failing_open)
+        monkeypatch.setattr(scan_index_module, "INSERT_BATCH_ROWS", 1)
+        with pytest.raises(RuntimeError, match="%TEMP%"):
+            scan_directory([str(dup_tree)], by_hash=True, use_cache=False)
+        # the spill stays scan-scoped state even on the error path
+        assert opened and opened[-1].closed
+
     def test_fallback_to_memory_index_scans_correctly(self, dup_tree, monkeypatch):
         import sqlite3
 

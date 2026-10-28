@@ -157,6 +157,61 @@ class TestSqliteSpill:
         idx.close()
         assert os.path.exists(str(p))
 
+    def test_flush_error_is_reraised_with_actionable_message(self, monkeypatch, tmp_path):
+        """M1: a spill write failure mid-walk must not reach the UI as a bare
+        'database is locked' — the scan aborts with a message that names the
+        temp location, and the original sqlite error stays chained."""
+        monkeypatch.setattr(scan_index, "INSERT_BATCH_ROWS", 1)
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingConn:
+            def executemany(self, *args, **kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        real_conn = idx._conn
+        idx._conn = FailingConn()
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                idx.add("p", "p", 1, 0.0, 0.0)
+        finally:
+            idx._conn = real_conn
+            idx.close()
+        message = str(excinfo.value)
+        assert "%TEMP%" in message
+        assert "database is locked" in message
+        assert isinstance(excinfo.value.__cause__, sqlite3.OperationalError)
+
+    def test_finish_flush_error_is_reraised_with_actionable_message(self, monkeypatch, tmp_path):
+        """The batch still buffered when the walk ends hits the same guard
+        through finish(), not only through a mid-walk add()."""
+        idx = SqliteScanIndex(str(tmp_path / "idx.db"))
+
+        class FailingConn:
+            def executemany(self, *args, **kwargs):
+                raise sqlite3.OperationalError("disk I/O error")
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        real_conn = idx._conn
+        idx._conn = FailingConn()
+        idx.add("p", "p", 1, 0.0, 0.0)  # stays buffered (batch = 5000 rows)
+        try:
+            with pytest.raises(RuntimeError, match="%TEMP%"):
+                idx.finish()
+        finally:
+            idx._conn = real_conn
+            idx.close()
+
     def test_failed_connect_cleans_own_temp_file(self, monkeypatch):
         import os
         captured = {}

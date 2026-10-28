@@ -31,6 +31,7 @@ import tempfile
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from app_logging import get_logger
+from locales import get_text
 
 logger = get_logger(__name__)
 
@@ -159,8 +160,17 @@ class SqliteScanIndex(ScanIndex):
         if not self._buffer:
             return
         # Parameterised executemany — never string-built SQL.
-        self._conn.executemany("INSERT INTO idx (path, name, size, created, modified) VALUES (?, ?, ?, ?, ?)", self._buffer)
-        self._conn.commit()
+        try:
+            self._conn.executemany("INSERT INTO idx (path, name, size, created, modified) VALUES (?, ?, ?, ?, ?)", self._buffer)
+            self._conn.commit()
+        except sqlite3.Error as ex:
+            # A dead spill write (disk full, permissions, locked file) must not
+            # abort the scan with a bare 'database is locked' (M1): name the
+            # temp location so the user can act on it. main.py renders the
+            # exception message verbatim; the sqlite error stays chained for
+            # logging/debugging.
+            logger.error("scan index spill write failed: %s", ex)
+            raise RuntimeError(get_text("scan_index_spill_error").format(ex)) from ex
         self._buffer.clear()
 
     def finish(self) -> None:
