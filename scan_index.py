@@ -130,8 +130,17 @@ class MemoryScanIndex(ScanIndex):
         if not by_size:
             total = len(self._all)
             return (1, total) if total > 1 else (0, 0)
-        dup = [rows for rows in self._by_size.values() if len(rows) > 1]
-        return len(dup), sum(len(rows) for rows in dup)
+        # L5: one pass over the size buckets into two counters — the old list
+        # comprehension of duplicate groups cost O(#groups) pointers on every
+        # call, the one allocation this index cannot afford to make worse than
+        # the SQLite spill it stands in for.
+        groups = 0
+        files = 0
+        for rows in self._by_size.values():
+            if len(rows) > 1:
+                groups += 1
+                files += len(rows)
+        return groups, files
 
     def iter_candidate_groups(self, by_size: bool = True) -> Iterator[List[Row]]:
         if not by_size:

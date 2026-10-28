@@ -111,6 +111,38 @@ class TestIndexContract:
         assert first == second
 
 
+class TestMemoryIndexStats:
+    def test_stats_allocate_no_per_group_list(self):
+        """L5: candidate_stats must not build an intermediate list of the
+        duplicate groups (O(#groups) pointers on top of the index). The spill
+        backend answers from SQLite; the fallback must not be the hog of the
+        pair on a tree made of many small pairs."""
+        import tracemalloc
+
+        idx = MemoryScanIndex()
+        try:
+            for size in range(20_000):
+                idx.add(f"p{size}", f"n{size}", size, 0.0, 0.0)
+                idx.add(f"q{size}", f"q{size}", size, 0.0, 0.0)
+
+            started_here = not tracemalloc.is_tracing()
+            if started_here:
+                tracemalloc.start()
+            baseline = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            stats = idx.candidate_stats(by_size=True)
+            peak = tracemalloc.get_traced_memory()[1]
+            if started_here:
+                tracemalloc.stop()
+        finally:
+            idx.close()
+
+        assert stats == (20_000, 40_000)
+        # A list of 20k group references alone is ~160 KB; two counters need
+        # none of it.
+        assert peak - baseline < 64 * 1024
+
+
 class TestSqliteSpill:
     def test_spill_needs_no_sqlite_temp_files(self, tmp_path):
         """ORDER BY / CREATE INDEX must not spill to SQLite's own temp dir:
