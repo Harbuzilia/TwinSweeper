@@ -151,7 +151,27 @@ class ScanIndex:
 
 
 class MemoryScanIndex(ScanIndex):
-    """Tuple-row in-RAM index — fallback when the SQLite spill is unavailable."""
+    """Tuple-row in-RAM index — fallback when the SQLite spill is unavailable.
+
+    Both buckets hold **lists**, not sets, and their order is load-bearing:
+
+    * ``_by_size[size]`` keeps a size group's rows in discovery (insert) order.
+      That order is part of the cross-backend contract:
+      ``SqliteScanIndex`` streams ``ORDER BY first_rowid, rowid`` — groups by
+      the first appearance of their size, rows in discovery order — so a scan
+      yields identical groups on either backend.
+    * ``_all`` holds every row in the same discovery order and backs the
+      ``by_size=False`` pool (one group of all rows, matching the spill's
+      ``ORDER BY rowid``).
+    * Set semantics would be wrong twice over: a set loses insertion order
+      (group order is visible in the results), and it silently collapses equal
+      rows, which would move ``candidate_stats`` counts and the progress
+      display built on them. The index does not need that safety net — rows
+      are unique per path because the walk de-dups inodes before ``add()``.
+    * The lists are owned by the index: ``iter_candidate_groups`` hands out the
+      live list of a size group (the ``by_size=False`` pool is copied), so a
+      caller must treat the yielded rows as read-only.
+    """
 
     def __init__(self) -> None:
         self._by_size: Dict[int, List[Row]] = {}
